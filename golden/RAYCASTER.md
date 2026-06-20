@@ -1,78 +1,115 @@
-# Raycaster ROM search
+# Raycaster ROM, search and build
 
 The end goal for openttdoom is a Wolfenstein style raycaster running as a CHIP-8
-program on the train built machine. This note records the search for an existing
-raycaster ROM so we do not write one from scratch if a good one already exists.
-Building the raycaster is NOT part of this run, this is just reconnaissance.
+program on the train built machine. This note first records the search for an
+existing raycaster ROM, then documents the minimal raycaster that was actually
+built and verified in the golden model.
 
-## What I looked for
+## What was built (the deliverable)
 
-A CHIP-8, SUPER-CHIP, or XO-CHIP ROM that does pseudo-3D / raycast first person
-rendering, ideally with source so we can study and retarget it, and ideally plain
-CHIP-8 rather than XO-CHIP so it fits the 64x32 monochrome framebuffer that maps
-1:1 onto the signal display.
+A minimal Wolfenstein style raycaster, hand assembled to a real plain CHIP-8 ROM
+that executes in the golden interpreter (`golden/chip8.py`) and draws a
+recognizable pseudo-3D maze view to the 64x32 framebuffer. No interpreter changes
+were needed: it uses only standard CHIP-8 opcodes.
 
-## What exists
+Files:
 
-There are two real candidates, both verified to exist.
+- `golden/asm.py` is a tiny CHIP-8 assembler (labels, the standard opcode set).
+  Every mnemonic maps to the exact opcode `chip8.py` decodes, so its output runs
+  for real on the golden interpreter. Unit tested in `test_raycaster.py`.
+- `golden/raycaster.py` builds the raycaster ROM and carries the pure-Python
+  reference renderer that is the oracle. `build_rom(heading)` assembles a ROM,
+  `render_reference(heading)` is the oracle, `render_rom(heading)` runs the ROM
+  in the interpreter and returns the machine.
+- `golden/render_raycaster.py` renders a turn sweep to `golden/out/ray_*.png`.
+- `golden/test_raycaster.py` proves, by really executing the ROM, that it matches
+  the reference for all 32 headings, is deterministic, and stays on standard
+  opcodes, and pins exact framebuffer hashes.
+
+How to run:
+
+```
+cd golden
+python render_raycaster.py          # writes golden/out/ray_00.png .. ray_15.png
+python -m pytest test_raycaster.py -q
+```
+
+### The algorithm
+
+A fixed-point DDA grid raycaster, kept deliberately CHIP-8 friendly because the
+machine has no multiply, no divide, and only 8-bit registers.
+
+- Map: a 16x16 cell maze, 1 bit per cell, with a solid border. Corridors,
+  pillars and rooms so rotating the view reveals walls at a range of depths.
+- Position: measured in 16th-of-a-cell units, so each axis is 0..255 and fits one
+  unsigned byte. Cell index is `pos >> 4`, the map byte is `MAP[(SY & 0xF0) | (SX >> 4)]`.
+- Rays: 32 columns across a 90 degree field of view, each drawn 2 pixels wide to
+  fill the 64 pixel width. The per column angle offset is a baked table so the ROM
+  needs no divide.
+- Per ray DDA: a per-angle delta `(dx, dy)` is stored as magnitude (0..3) plus a
+  sign bit, because CHIP-8 is unsigned. Each micro-step adds or subtracts the
+  magnitude and tests the map cell. The border is solid and the step magnitude is
+  smaller than a cell, so a ray always lands in a border cell before it could run
+  off the 0..255 numeric range, which means no off-map carry math is needed.
+- Wall height: the DDA step count at the hit indexes a reciprocal table that gives
+  the slice height (near hit, tall slice). The slice is drawn centered as a
+  vertical run of a 1x1 dot sprite.
+
+The trig (`DIRX_MAG`, `DIRY_MAG`, `SIGNX`, `SIGNY`), the per column angle table,
+and the reciprocal table are all baked into the ROM as data. On the train
+substrate these become hardwired landscape, which is exactly why a table-driven
+raycaster was chosen as the workload (the architecture brief).
+
+### Verification
+
+`render_reference` is the oracle and `render_rom` runs the assembled bytes in the
+unmodified `chip8.Chip8`. `test_raycaster.py` requires them to be byte-for-byte
+equal for all 32 headings, asserts run-to-run determinism (no input, no RNG), and
+pins exact framebuffer sha256 fingerprints for several headings. The frames in
+`golden/out/ray_*.png` are produced by that same real execution path, not drawn
+by hand. The ROM is 652 bytes and a frame finishes in about 30k instructions.
+
+## Why a ROM was hand built rather than reused
+
+No clean plain CHIP-8, 64x32 monochrome raycaster ROM exists. The two real
+candidates are both XO-CHIP and do not map onto the 1-bit 64x32 signal display:
 
 1. Chipenstein 3D, by John Earnest, in the Octo examples repository.
    https://github.com/JohnEarnest/Octo/blob/gh-pages/examples/demos/chipenstein.8o
-   Raw source (HTTP 200, 6474 bytes) confirmed at:
-   https://raw.githubusercontent.com/JohnEarnest/Octo/gh-pages/examples/demos/chipenstein.8o
-   This is the most useful find. It is a work in progress raycast 2.5d shooter
-   with full Octo assembly source, a 16x16 map, and a documented raycast routine.
-   The header says it "uses PWM techniques to simulate extra colors and must run
-   at 1000 cycles/frame", so it is XO-CHIP and leans on high cycle counts and
-   color PWM, not a clean monochrome 64x32 fit. Still, the raycast math and the
-   map walking loop are exactly the parts we want to reuse.
-
+   A work in progress raycast 2.5d shooter with full Octo source, a 16x16 map and
+   a documented raycast routine. Its header says it "uses PWM techniques to
+   simulate extra colors and must run at 1000 cycles/frame", so it is XO-CHIP and
+   leans on color-plane PWM and high cycle counts, not a monochrome 64x32 fit.
 2. Simple Raycaster (XO-Chip), by Kouzerumatsukite, from an Octojam.
    https://kouzeru.itch.io/simple-raycaster-xo-chip
-   An itch.io release. Also XO-CHIP. Source availability not confirmed from the
-   itch.io page, would need to be downloaded and checked.
+   Also XO-CHIP.
 
-## Assessment
+Both need extended XO-CHIP opcodes the golden interpreter does not implement
+(`F000 NNNN` long load I, `FN01` plane select, `00DN/00FB/00FC` scroll, `00FF`
+hires), 128x64 hires, and color planes. Retargeting Chipenstein to monochrome
+64x32 would mean rewriting it in Octo and reassembling, but there is no Octo or
+c-octo assembler in this environment and no C compiler to build one. So the
+tractable, honest path was to write a small raycaster from scratch with the tiny
+`asm.py` assembler, which is what was done.
 
-No clean plain-CHIP-8, 64x32 monochrome raycaster turned up. Both candidates are
-XO-CHIP and assume the higher XO-CHIP cycle budget and extra colors. That matters
-for us because:
+This is a deliberate, documented choice (option b of the brief's two paths):
+extending the interpreter with unverified XO-CHIP opcodes purely to run a color
+PWM demo that then has to be stripped back to monochrome anyway is more risk and
+less payoff than a small, fully verified plain-CHIP-8 raycaster that already maps
+1:1 onto the signal framebuffer.
 
-- The signal framebuffer is 1-bit monochrome 64x32 (P0), so XO-CHIP color PWM and
-  the larger SUPER-CHIP/XO-CHIP 128x64 mode do not map directly. We would target
-  the monochrome subset.
-- XO-CHIP "1000 cycles/frame" is a software pacing assumption. On the train
-  machine, clock rate is whatever the substrate gives us, so that number is not a
-  hard constraint, but it does tell us the per frame instruction count is large.
+## Roadmap (not built this run)
 
-Chipenstein 3D is the clear reference to study. It proves the algorithm fits in
-the CHIP-8 instruction set and gives us a working map format and raycast loop.
+The raycaster here is a static-frame-per-heading demo: each frame bakes its
+heading into a fresh ROM. A later run can:
 
-## Plan for later (do NOT build now)
-
-This is a sketch for the human or a later run, not work for this run.
-
-1. Pull chipenstein.8o into vendor/chip8/ and run it in this golden model to see
-   how far the plain interpreter gets. It is XO-CHIP, so first confirm which
-   XO-CHIP opcodes it uses (the 00DN scroll ops, F000 long load, plane select,
-   audio). Our interpreter is plain CHIP-8 today, so it will likely halt on the
-   first XO-CHIP opcode. That tells us exactly what to add.
-
-2. Decide the target tier. Cleanest path for the signal display is a monochrome
-   64x32 raycaster. Options, in order of preference:
-   a. Strip Chipenstein down to monochrome single plane and 64x32.
-   b. Write a minimal new raycaster in Octo from scratch: a small fixed map, one
-      ray per screen column (64 columns), distance to wall via DDA grid step,
-      column height from a reciprocal lookup table (the math tables become free
-      hardwired ROM on the substrate, per the architecture brief), draw vertical
-      wall slices with DXYN. No texturing, no color, no sprites.
-
-3. Bake the resulting .ch8 as ROM for the place and route ROM block. The sin /
-   cos / reciprocal lookup tables become hardwired landscape, which is the whole
-   reason a raycaster was chosen as the workload.
-
-4. Cross check the ROM in the golden model here first (render frames to PNG,
-   confirm wall slices look right) before anything touches the train build.
+- Make it interactive: read the keypad (`EX9E`/`EXA1`) to turn and move the
+  player inside one ROM, instead of one ROM per heading.
+- Add player translation (forward/back/strafe), not just rotation.
+- Texture or shade walls by distance once a grayscale or dithered display path
+  exists (out of scope now, the display is 1-bit P0).
+- Bake the ROM into the place-and-route ROM block so the lookup tables become
+  hardwired landscape on the train substrate.
 
 ## Sources
 
@@ -81,3 +118,5 @@ This is a sketch for the human or a later run, not work for this run.
 - Chipenstein 3D source: https://github.com/JohnEarnest/Octo/blob/gh-pages/examples/demos/chipenstein.8o
 - Simple Raycaster XO-Chip: https://kouzeru.itch.io/simple-raycaster-xo-chip
 - Octo IDE / assembler: https://github.com/JohnEarnest/Octo and https://github.com/JohnEarnest/c-octo
+- Cowgod's CHIP-8 opcode reference (used to match asm.py encodings to chip8.py):
+  http://devernay.free.fr/hacks/chip8/C8TECH10.HTM
