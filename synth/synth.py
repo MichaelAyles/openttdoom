@@ -7,11 +7,11 @@ file as a script writes both the structural netlist and the lowered one to synth
       -> synth/out/adder4.json       (structural, readable gate types)
       -> synth/out/adder4_nor.json   (lowered to {NOR, CONST0, CONST1}, buildable)
 
-The structural builder in hdl/adder.py is the verified synthesis path. A real yosys is
-also reachable here (the WASM build bundled with amaranth-yosys) and is used as a cross
-check in the tests, but that stripped build cannot techmap to a NOR cell library, so the
-NOR lowering is done by Netlist.to_nor(). See synth/adder4.ys and STUCK notes for the
-proper full-yosys path left for a human.
+The structural builder in hdl/adder.py is the verified synthesis path and needs no external
+tools. When a full yosys (from oss-cad-suite) is installed, running this script ALSO runs the
+proper verilog -> techmap -> NOR flow (synth/yosys_synth.py, script synth/adder4.ys) and
+confirms its netlist is equivalent to this Python flow. When yosys is absent, the Python flow
+stands alone and the NOR lowering is done by Netlist.to_nor(). See synth/adder4.ys for details.
 """
 
 from __future__ import annotations
@@ -64,6 +64,21 @@ def main() -> int:
     print("structural cells:", {k: v for k, v in s_stats.items() if not k.startswith("_")})
     print("lowered NOR gate count:", n_stats.get("NOR", 0))
     print("lowered total cells:", n_stats["_total_cells"], "nets:", n_stats["_nets"])
+
+    # Proper full-yosys path, when a complete yosys is installed. Confirms the real
+    # verilog -> techmap -> NOR synthesis is equivalent to the Python flow above. Skipped
+    # cleanly when yosys is absent (the Python flow is the verified default).
+    try:
+        from yosys_synth import find_yosys, synth_adder4_yosys
+        from netlist import equivalent
+        if find_yosys() is not None:
+            yl, ypath = synth_adder4_yosys()
+            print("wrote", ypath, f"(real yosys techmap, {yl.stats()['_total_cells']} cells)")
+            print("yosys NOR netlist equivalent to Python flow:", equivalent(lowered, yl))
+        else:
+            print("full yosys not found; Python flow is the verified path (see synth/adder4.ys).")
+    except Exception as e:  # never let the optional cross-check break the core synth
+        print("yosys cross-check skipped:", e)
     return 0
 
 

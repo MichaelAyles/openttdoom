@@ -1,0 +1,21 @@
+/* NOR-only standard cell library for openttdoom.
+ *
+ * The OpenTTD substrate physically builds exactly one gate, NOR (universal). NOT is a
+ * one input NOR, so it costs the same tile. This liberty file gives abc a single-gate
+ * library to cover the design with, so a real yosys run (yosys synth/adder4.ys) maps the
+ * 4-bit adder down to the same buildable {NOR, NOT} set the Python flow produces via
+ * Netlist.to_nor(). See synth/adder4.ys for the run instructions.
+ */
+library(nor_substrate) {
+  cell(NOR2) {
+    area: 1;
+    pin(A) { direction: input; }
+    pin(B) { direction: input; }
+    pin(Y) { direction: output; function: "(A+B)'"; }
+  }
+  cell(NOT) {
+    area: 1;
+    pin(A) { direction: input; }
+    pin(Y) { direction: output; function: "A'"; }
+  }
+}

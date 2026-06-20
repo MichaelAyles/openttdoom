@@ -1,34 +1,28 @@
-# TODO(human): proper full-yosys synthesis of the 4-bit adder to a NOR-only cell library.
+# Proper full-yosys synthesis of the 4-bit adder to the buildable NOR / NOT cell set.
 #
-# This script is the intended "real synthesis" path: read a verilog adder, synthesise,
-# and techmap it down to a single-gate NOR cell library, matching what the OpenTTD
-# substrate can physically build (NOR is universal, NOT is a one input NOR).
+# This is the "real synthesis" path: read a verilog adder, synthesise, and techmap it down
+# to the single-gate set the OpenTTD substrate can physically build (NOR is universal, NOT is
+# a one input NOR). It is now WORKING in this repo with a full yosys from oss-cad-suite.
 #
-# STATUS in this environment:
-#   The only yosys reachable here is the stripped WASM build bundled with the
-#   amaranth-yosys PyPI package. That build has NO read_verilog frontend, NO techmap,
-#   NO abc, and NO synth command, so it cannot run this script. It can only read the
-#   RTLIL that the amaranth frontend emits, run opt/simplemap, and write_json.
+# STATUS: verified. synth/yosys_synth.py drives this flow end to end (it emits synth/adder4.v
+# from the behavioural amaranth Adder4, runs yosys, and imports the result), and
+# synth/test_yosys.py confirms the yosys NOR netlist adds correctly over all 512 input combos
+# and is equivalent() to the Python flow (synth/out/adder4_nor.json). yosys's abc gives a
+# tighter result (62 cells) than the Python to_nor lowering (92 cells); both are correct.
 #
-#   Because of that, the verified synthesis path in this repo is the structural Python
-#   builder in hdl/adder.py (build_adder4_netlist), lowered to NOR by Netlist.to_nor().
-#   A real-yosys gate-level cross-check still runs in hdl/test_adder.py: it drives the
-#   WASM yosys over amaranth RTLIL and produces a genuine gate-level netlist
-#   (8x XOR, 8x AND, 4x OR), which we import and verify. The NOR techmap below is what
-#   stays undone until a full yosys is installed.
-#
-# TO RUN THIS (human, with a complete yosys, e.g. from oss-cad-suite):
-#   1. Emit the adder as verilog. Easiest is from the behavioural amaranth module:
-#        python -c "from amaranth.back import verilog; from hdl.adder import Adder4; \
-#                   d=Adder4(); \
-#                   open('synth/adder4.v','w').write( \
-#                     verilog.convert(d, ports=[d.a,d.b,d.cin,d.s,d.cout], name='adder4'))"
-#      (or write a small structural adder4.v by hand).
+# TO RUN THIS by hand (with a full yosys on PATH, e.g. from oss-cad-suite):
+#   1. emit the verilog:  python -c "import sys; sys.path[:0]=['hdl','synth']; \
+#        from amaranth.back import verilog; from adder import Adder4; d=Adder4(); \
+#        open('synth/adder4.v','w').write(verilog.convert(d, \
+#          ports=[d.a,d.b,d.cin,d.s,d.cout], name='adder4'))"
 #   2. yosys synth/adder4.ys
+#   Or just: python synth/yosys_synth.py   (does both and checks equivalence).
 #
-# Expected result: synth/out/adder4_nor_yosys.json holding a netlist whose only cell
-# type is NOR (plus tie cells), logically equal to synth/out/adder4_nor.json from the
-# Python flow. Compare them with synth/netlist.py's equivalent().
+# NOTE on the abc step: we map with abc's built-in NOR gate set ("abc -g NOR") rather than
+# "abc -liberty synth/nor.lib". On the Windows oss-cad-suite build, yosys's liberty-to-genlib
+# conversion fails ("merged SCL conversion failed") and abc then writes no output. "abc -g NOR"
+# covers the design with the same buildable {NOR, NOT} set and works. synth/nor.lib is kept as
+# the explicit cell description for yosys builds where the liberty path works.
 
 read_verilog synth/adder4.v
 hierarchy -check -top adder4
@@ -46,9 +40,8 @@ opt
 techmap
 opt
 
-# map all gates to the NOR-only cell library via abc.
-# nor.lib defines a single NOR cell (and NOT as a one input NOR), see below.
-abc -liberty synth/nor.lib
+# map all gates to the buildable NOR + NOT set via abc's built-in gate library.
+abc -g NOR
 opt
 clean
 
