@@ -67,14 +67,21 @@ Total test count: 80 passing (`python -m pytest -q`).
   walks cells, routes and bridges using the real GS API. The stamp helpers lay placeholder
   track (one straight per pin, track along each route, a bridge at each crossing), which is
   visible structure but does NOT compute. The computing NOR geometry is still `TODO(human)`.
-- NOW PROVEN: the GameScript actually runs in OpenTTD and builds the placed-and-routed design
-  as real rail and bridges, captured as screenshots (1-bit, 2-bit and 4-bit adders, see
-  `out_screens/`). The construction mechanism and the deity/company build-context are solved:
-  a dedicated server (`-D`) builds headlessly, a company is created with the RCON command
-  `start_ai` that the GS waits for, and the GS maxes its loan to afford the build. The whole
-  headless recipe is automated in `tools/ottd_render.py` (drive via the admin port in
-  `tools/ottd_admin.py`). What remains blocked is only the exact tile-by-tile NOR geometry
-  that makes a stamped cell compute (see STUCK.md #1).
+- NOW PROVEN, TWO WAYS, the placed-and-routed design appears as real rail in OpenTTD:
+  1. GameScript build: the GS runs in OpenTTD and stamps the design as rail and bridges at
+     runtime. The construction mechanism and the deity/company context are solved: a dedicated
+     server (`-D`) builds headlessly, a company is made with the RCON command `start_ai` that
+     the GS waits for, and the GS maxes its loan to afford it. Automated in `tools/ottd_render.py`,
+     driven via the admin port (`tools/ottd_admin.py`). Robust but slow (a big design takes
+     minutes of in-game build time).
+  2. Direct save writer (`tools/sav_writer.py`): writes the design straight into an
+     uncompressed OTTN savegame by editing the map tile arrays in place (the rail-tile encoding
+     reverse-engineered from the OpenTTD 15.3 source: type/MAPT, owner/MAPO, track bits/MAP5,
+     rail type/MAP8, per rail_map.h MakeRailNormal). This is INSTANT (the full 4-bit adder,
+     40k tiles, in ~0.3s), needs no company/money/build, and can flatten the map to a plain
+     canvas of any size. Screenshots of the 1-bit, 2-bit and 4-bit adders are in `out_screens/`.
+  What remains blocked is only the exact tile-by-tile NOR geometry that makes a stamped cell
+  COMPUTE (the layouts above are visible structure, not working logic). See STUCK.md #1.
 
 ### M3, toolchain spine. DONE, verified in software.
 

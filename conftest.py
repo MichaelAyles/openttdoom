@@ -7,7 +7,7 @@ import os
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-for _d in ("synth", "place_and_route", "hdl", "golden", "scenarios"):
+for _d in ("synth", "place_and_route", "hdl", "golden", "scenarios", "tools"):
     _p = os.path.join(ROOT, _d)
     if _p not in sys.path:
         sys.path.insert(0, _p)
