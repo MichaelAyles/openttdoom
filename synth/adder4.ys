@@ -1,0 +1,78 @@
+# TODO(human): proper full-yosys synthesis of the 4-bit adder to a NOR-only cell library.
+#
+# This script is the intended "real synthesis" path: read a verilog adder, synthesise,
+# and techmap it down to a single-gate NOR cell library, matching what the OpenTTD
+# substrate can physically build (NOR is universal, NOT is a one input NOR).
+#
+# STATUS in this environment:
+#   The only yosys reachable here is the stripped WASM build bundled with the
+#   amaranth-yosys PyPI package. That build has NO read_verilog frontend, NO techmap,
+#   NO abc, and NO synth command, so it cannot run this script. It can only read the
+#   RTLIL that the amaranth frontend emits, run opt/simplemap, and write_json.
+#
+#   Because of that, the verified synthesis path in this repo is the structural Python
+#   builder in hdl/adder.py (build_adder4_netlist), lowered to NOR by Netlist.to_nor().
+#   A real-yosys gate-level cross-check still runs in hdl/test_adder.py: it drives the
+#   WASM yosys over amaranth RTLIL and produces a genuine gate-level netlist
+#   (8x XOR, 8x AND, 4x OR), which we import and verify. The NOR techmap below is what
+#   stays undone until a full yosys is installed.
+#
+# TO RUN THIS (human, with a complete yosys, e.g. from oss-cad-suite):
+#   1. Emit the adder as verilog. Easiest is from the behavioural amaranth module:
+#        python -c "from amaranth.back import verilog; from hdl.adder import Adder4; \
+#                   d=Adder4(); \
+#                   open('synth/adder4.v','w').write( \
+#                     verilog.convert(d, ports=[d.a,d.b,d.cin,d.s,d.cout], name='adder4'))"
+#      (or write a small structural adder4.v by hand).
+#   2. yosys synth/adder4.ys
+#
+# Expected result: synth/out/adder4_nor_yosys.json holding a netlist whose only cell
+# type is NOR (plus tie cells), logically equal to synth/out/adder4_nor.json from the
+# Python flow. Compare them with synth/netlist.py's equivalent().
+
+read_verilog synth/adder4.v
+hierarchy -check -top adder4
+
+# generic synthesis: processes -> netlist, flatten, coarse optimisation.
+proc
+flatten
+opt
+fsm
+opt
+memory
+opt
+
+# break arithmetic and coarse cells down to single-bit gates.
+techmap
+opt
+
+# map all gates to the NOR-only cell library via abc.
+# nor.lib defines a single NOR cell (and NOT as a one input NOR), see below.
+abc -liberty synth/nor.lib
+opt
+clean
+
+# tidy and write out.
+opt_clean
+write_json synth/out/adder4_nor_yosys.json
+stat
+
+# --- companion liberty file synth/nor.lib that this abc call expects ---------------
+# Create synth/nor.lib with a single buildable NOR cell, for example:
+#
+#   library(nor_substrate) {
+#     cell(NOR2) {
+#       area: 1;
+#       pin(A) { direction: input; }
+#       pin(B) { direction: input; }
+#       pin(Y) { direction: output; function: "(A+B)'"; }
+#     }
+#     cell(NOT) {
+#       area: 1;
+#       pin(A) { direction: input; }
+#       pin(Y) { direction: output; function: "A'"; }
+#     }
+#   }
+#
+# abc will then cover the design with NOR2/NOT cells. A post pass can rename NOT to a
+# one input NOR if the place-and-route stamp prefers a single primitive.
