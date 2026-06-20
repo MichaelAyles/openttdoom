@@ -168,8 +168,16 @@ function OpenttdoomMain::StampCell(cell) {
 }
 
 /*
- * Lay track for one net along its routed path. route has .net and .path, an
- * ordered list of [x, y] tiles from place_and_route.
+ * Lay track for one net along its routed path. route has .net, .path (an ordered
+ * list of [x, y] tiles from place_and_route) and .bridges (the subset of path
+ * tiles where THIS net is the one carried OVER a perpendicular crossing).
+ *
+ * The channel router lays every net on a unique horizontal trunk row reached by
+ * unique-column vertical risers, and two nets only ever meet at a clean
+ * perpendicular crossing. On the substrate that crossing is a BRIDGE: the trunk
+ * (this net, on a bridge tile) passes over the perpendicular riser of the other
+ * net. So for every tile in route.bridges we build a bridge over the crossing
+ * instead of plain track; every other tile is laid as ordinary track.
  *
  * Laying a connected run of track means, for each interior tile, choosing the
  * track piece that connects the previous tile to the next one (straight or one
@@ -180,25 +188,70 @@ function OpenttdoomMain::StampCell(cell) {
 function OpenttdoomMain::LayRoute(route) {
     local path = route.path;
     if (path.len() < 2) return;
-    GSLog.Info("  route '" + route.net + "' len " + path.len());
+
+    // Set of bridge tiles for O(1) lookup while walking the path. The key is the
+    // packed TileIndex so it matches what we build on.
+    local bridge_set = {};
+    foreach (b in route.bridges) {
+        bridge_set[this.Tile(b[0], b[1])] <- true;
+    }
+    GSLog.Info("  route '" + route.net + "' len " + path.len()
+               + " bridges " + route.bridges.len());
 
     for (local i = 0; i < path.len() - 1; i++) {
         local a = path[i];
         local b = path[i + 1];
-        local piece = this.TrackPieceBetween(
-            (i > 0 ? path[i - 1] : a), a, b);
-        // TODO(human): TrackPieceBetween covers straights; curve selection at
-        // bends and the bridges/tunnels the reference gates use for crossings
-        // are not handled. Diagonal moves are also not handled.
-        GSRail.BuildRailTrack(this.Tile(a[0], a[1]), piece);
+        local tile = this.Tile(a[0], a[1]);
+        if (tile in bridge_set) {
+            this.LayBridge(route, a, (i > 0 ? path[i - 1] : a), b);
+        } else {
+            local piece = this.TrackPieceBetween(
+                (i > 0 ? path[i - 1] : a), a, b);
+            // TODO(human): TrackPieceBetween covers straights; curve selection at
+            // bends is not handled, nor diagonal moves.
+            GSRail.BuildRailTrack(tile, piece);
+        }
     }
-    // last tile of the run.
+    // last tile of the run (trunk ends are always plain track, never a bridge).
     local last = path[path.len() - 1];
     GSRail.BuildRailTrack(this.Tile(last[0], last[1]), GSRail.RAILTRACK_NE_SW);
 
     // TODO(human): place one-way signals along the run so the carrier train
     // moves in the routed direction and presents its bit at the far end on the
     // clock edge. Spacing and signal type depend on the gate timing.
+}
+
+/*
+ * Build a single-tile bridge carrying THIS net's (horizontal) trunk over the
+ * perpendicular (vertical) riser of another net at tile `a`. prev and nxt are the
+ * path neighbours, so the bridge runs along the trunk direction (prev -> a -> nxt).
+ *
+ * The data flow is wired: every tile place_and_route marked as a bridge crossing
+ * arrives here and we call GSBridge.BuildBridge over it. The exact bridge type
+ * lookup and the head/ramp geometry that make a one-tile overpass land cleanly on
+ * the OpenTTD grid still need calibration in game, so that part stays TODO(human),
+ * but the crossing list now drives real bridge construction rather than plain
+ * track that would short the two signals together.
+ */
+function OpenttdoomMain::LayBridge(route, a, prev, nxt) {
+    // Bridge end tiles: one tile back along the trunk and one tile forward, so the
+    // span clears the perpendicular riser underneath the crossing tile `a`.
+    local head = this.Tile(prev[0], prev[1]);
+    local tail = this.Tile(nxt[0], nxt[1]);
+    GSLog.Info("    bridge for '" + route.net + "' over crossing at ("
+               + a[0] + "," + a[1] + ")");
+
+    // TODO(human): pick a buildable rail bridge type for the span length and the
+    // current rail type, e.g.
+    //   local types = GSBridgeList_Length(2);
+    //   local bt = types.IsEmpty() ? -1 : types.Begin();
+    //   GSBridge.BuildBridge(GSVehicle.VT_RAIL, bt, head, tail);
+    // The head/tail orientation and exact ramp tiles need in-game calibration;
+    // until then this records the intent and the crossing data flows through.
+    local types = GSBridgeList_Length(GSMap.DistanceManhattan(head, tail) + 1);
+    if (!types.IsEmpty()) {
+        GSBridge.BuildBridge(GSVehicle.VT_RAIL, types.Begin(), head, tail);
+    }
 }
 
 /*

@@ -50,6 +50,12 @@ class PlacedCell:
 class Route:
     net: str
     path: List[Coord] = field(default_factory=list)   # ordered tiles forming the track
+    # Tiles where THIS net is the one carried OVER a perpendicular crossing (a bridge). At
+    # a bridge tile two nets share the tile legally: one passes straight through underneath
+    # (the ground net) and one is carried over on a bridge (this net, when the tile is in
+    # its bridges list). Exactly one of the two crossing nets records the tile here. Old
+    # scenario JSON without this field still loads (defaults to no bridges).
+    bridges: List[Coord] = field(default_factory=list)
 
 
 @dataclass
@@ -122,7 +128,8 @@ class Scenario:
             cells.append(PlacedCell(
                 id=c["id"], type=c["type"], x=c["x"], y=c["y"],
                 w=c["w"], h=c["h"], inputs=ins, output=out))
-        routes = [Route(net=r["net"], path=[tuple(t) for t in r.get("path", [])])
+        routes = [Route(net=r["net"], path=[tuple(t) for t in r.get("path", [])],
+                        bridges=[tuple(t) for t in r.get("bridges", [])])
                   for r in d.get("routes", [])]
         io = [IOPad(**p) for p in d.get("io", [])]
         fb = Framebuffer(**d["framebuffer"]) if d.get("framebuffer") else None
@@ -165,7 +172,8 @@ class Scenario:
         route_strs = []
         for r in self.routes:
             pts = arr([f"[{x}, {y}]" for (x, y) in r.path])
-            route_strs.append(f'{{net="{r.net}", path={pts}}}')
+            brs = arr([f"[{x}, {y}]" for (x, y) in r.bridges])
+            route_strs.append(f'{{net="{r.net}", path={pts}, bridges={brs}}}')
         lines.append("    routes = " + arr(route_strs) + ",")
         io_strs = [f'{{port="{p.port}", net="{p.net}", x={p.x}, y={p.y}, '
                    f'kind="{p.kind}"}}' for p in self.io]

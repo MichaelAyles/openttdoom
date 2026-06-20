@@ -10,9 +10,12 @@ matter for M3:
      I/O and identical exhaustive truth table. This reconstruction reads the placed cells and
      routes back out of the scenario, it does not echo the source netlist.
 
-Routing is crude (see route.py): it does not always reach 100 percent routed on congested
-designs, so the tests report routed-net coverage and assert it is substantial rather than
-demanding full routing. Unrouted nets are recorded honestly by the router and surfaced here.
+Routing is the constructive channel router (channel_route.py): it reaches 100 percent routed
+on the ripple adders by laying each net on a unique horizontal trunk row, connecting pins with
+unique-column vertical risers, and crossing other nets only as legal perpendicular bridges.
+So the adder tests demand FULL routing (unrouted == [] and zero DRC violations), and there are
+dedicated tests that a genuine same-direction overlap is still flagged route_short while a
+marked perpendicular bridge passes.
 
 Run just this file:  python -m pytest place_and_route/test_pnr.py -q
 """
@@ -22,7 +25,7 @@ from __future__ import annotations
 import os
 
 from netlist import NetlistBuilder, Netlist
-from scenario import Scenario
+from scenario import Scenario, Route
 from emit import build_scenario
 from check import (drc, overlap_violations, scenario_to_netlist,
                    verify_equivalence, unrouted_nets)
@@ -72,34 +75,36 @@ def wide_nor_netlist(fanin: int = 5) -> Netlist:
 
 # --- tests -----------------------------------------------------------------------
 
-def test_full_adder_placement_legal_and_equivalent():
-    nl = full_adder_1bit()
+def _assert_complete(nl: Netlist):
+    """Place + route nl and assert it routes COMPLETELY: every net connected, DRC clean,
+    logic preserved under strict (require_routed) equivalence. Returns (scen, rr)."""
     scen, rr = build_scenario(nl)
-
-    # 1. DRC is clean: no footprint overlap, off-map, route-cuts-cell/pad, or route shorts.
     assert overlap_violations(scen) == []
-    assert drc(scen) == [], f"DRC violations: {[v.kind for v in drc(scen)]}"
-
-    # 2. the reconstructed netlist is logically equivalent to the source.
-    assert verify_equivalence(nl, scen) is True
-
-    # routing is crude; report coverage and require it is substantial.
+    assert drc(scen) == [], f"DRC violations: {[(v.kind, v.detail) for v in drc(scen)]}"
+    assert unrouted_nets(scen) == [], f"unrouted: {unrouted_nets(scen)}"
+    assert verify_equivalence(nl, scen, require_routed=True) is True
     routed, total = rr.coverage()
-    assert routed >= int(0.8 * total), f"routed only {routed}/{total}"
+    assert routed == total, f"routed only {routed}/{total}"
+    return scen, rr
 
 
-def test_two_bit_ripple_adder_placement_legal_and_equivalent():
-    nl = ripple_adder(2)
-    scen, rr = build_scenario(nl)
+def test_one_bit_adder_routes_completely():
+    # The 1-bit full adder routes COMPLETELY: every net connected, DRC clean, strict equiv.
+    _assert_complete(full_adder_1bit())
 
-    assert overlap_violations(scen) == []
-    # no shorts: the committed routes are tile-disjoint even when some nets are unrouted.
-    assert [v for v in drc(scen) if v.kind == "route_short"] == []
-    assert verify_equivalence(nl, scen) is True
 
-    routed, total = rr.coverage()
-    # multi-bit adders are congested; the crude router still routes the bulk of nets.
-    assert routed >= int(0.6 * total), f"routed only {routed}/{total}"
+def test_two_bit_ripple_adder_routes_completely():
+    _assert_complete(ripple_adder(2))
+
+
+def test_four_bit_ripple_adder_routes_completely():
+    # The de-risking milestone: the 4-bit ripple adder, which the old maze router could not
+    # fully route (not planar), now routes 100 percent via perpendicular bridge crossings.
+    scen, rr = _assert_complete(ripple_adder(4))
+    # bridges are actually used (the netlist is not planar), and every bridge is on a real
+    # perpendicular crossing (drc would have flagged a stale marker).
+    total_bridges = sum(len(r.bridges) for r in scen.routes)
+    assert total_bridges > 0, "expected perpendicular bridge crossings in a 4-bit adder"
 
 
 def test_reconstruction_reads_from_scenario_not_source():
@@ -225,3 +230,76 @@ def test_truncated_output_route_is_flagged():
         assert False, "expected a truncated output route to be rejected"
     except ValueError as e:
         assert "wrong pins" in str(e)
+
+
+# --- bridge / crossing DRC rule --------------------------------------------------
+
+def _crossing_scenario(mark_bridge: bool, parallel: bool = False) -> Scenario:
+    """A tiny 2-route scenario with one shared tile, for the bridge DRC tests.
+
+    Net "h" runs horizontally across row 5 (x = 1..9); net "v" runs vertically down column 5
+    (y = 1..9). They meet at the single tile (5, 5): a clean perpendicular crossing. If
+    mark_bridge, net "h" (the horizontal one carried over) records (5,5) in its bridges, which
+    must make the crossing legal. If not, the unmarked crossing must be flagged route_short.
+
+    With parallel=True, net "v" is instead laid HORIZONTALLY on row 5 overlapping "h" at (5,5),
+    so the shared tile is a genuine same-direction overlap, which must always be route_short
+    regardless of any bridge marker. No cells or pads, so the only possible violation is the
+    tile-sharing rule under test.
+    """
+    h_path = [(x, 5) for x in range(1, 10)]
+    if parallel:
+        v_path = [(x, 5) for x in range(3, 8)]      # parallel run on the SAME row 5
+    else:
+        v_path = [(5, y) for y in range(1, 10)]      # perpendicular vertical through (5,5)
+    h = Route(net="h", path=h_path, bridges=([(5, 5)] if mark_bridge else []))
+    v = Route(net="v", path=v_path)
+    return Scenario(name="crossing", map_x=64, map_y=64, routes=[h, v])
+
+
+def test_perpendicular_bridge_passes_drc_unmarked_crossing_flagged():
+    # A perpendicular crossing marked as a bridge passes DRC; the SAME crossing NOT marked is
+    # flagged route_short. This is the core of the model change.
+    ok = _crossing_scenario(mark_bridge=True)
+    assert [v for v in drc(ok) if v.kind == "route_short"] == [], \
+        f"marked bridge should pass: {[v.detail for v in drc(ok)]}"
+
+    bad = _crossing_scenario(mark_bridge=False)
+    shorts = [v for v in drc(bad) if v.kind == "route_short"]
+    assert len(shorts) == 1, f"unmarked crossing must be flagged: {[v.detail for v in drc(bad)]}"
+    assert "(5, 5)" in shorts[0].detail
+
+
+def test_same_direction_overlap_still_route_short():
+    # A genuine same-direction overlap (two parallel segments of different nets on one tile,
+    # NOT a perpendicular bridge) is STILL flagged route_short, even if marked as a bridge.
+    overlap = _crossing_scenario(mark_bridge=False, parallel=True)
+    shorts = [v for v in drc(overlap) if v.kind == "route_short"]
+    assert shorts, "parallel same-direction overlap must be route_short"
+
+    # marking the overlapped tile as a bridge must NOT launder a same-direction short.
+    overlap_marked = _crossing_scenario(mark_bridge=True, parallel=True)
+    shorts_marked = [v for v in drc(overlap_marked) if v.kind == "route_short"]
+    assert shorts_marked, "a bridge marker cannot make a same-direction overlap legal"
+
+
+def test_bridges_survive_json_roundtrip():
+    # The new Route.bridges field serialises and reloads, and old JSON without it still loads
+    # (defaults to no bridges). A real routed scenario carries bridges through to_json/from_dict.
+    nl = ripple_adder(2)
+    scen, _ = build_scenario(nl)
+    assert sum(len(r.bridges) for r in scen.routes) > 0, "expected bridges in a 2-bit adder"
+
+    import json
+    scen2 = Scenario.from_dict(json.loads(scen.to_json()))
+    before = {r.net: sorted(r.bridges) for r in scen.routes}
+    after = {r.net: sorted(r.bridges) for r in scen2.routes}
+    assert before == after, "bridges must round-trip through JSON unchanged"
+    assert drc(scen2) == [], "reloaded scenario must still pass DRC"
+
+    # old JSON missing the bridges field still loads (backward compatible).
+    legacy = json.loads(scen.to_json())
+    for r in legacy["routes"]:
+        r.pop("bridges", None)
+    scen3 = Scenario.from_dict(legacy)
+    assert all(r.bridges == [] for r in scen3.routes)

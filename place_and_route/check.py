@@ -52,7 +52,11 @@ def drc(scenario: Scenario) -> List[Violation]:
         pins (a track may terminate on its driver/consumer pins, which sit on footprint
         boundaries, but must not cut across unrelated cell interiors),
       - a route running over a foreign IO pad tile (would short a framebuffer/input pad),
-      - two different nets' routes sharing a non-pin tile (a shorted signal).
+      - two different nets' routes sharing a non-pin tile UNLESS it is a clean perpendicular
+        bridge crossing (one net straight-horizontal, the other straight-vertical, with
+        exactly one net recording the tile in its Route.bridges); any other sharing
+        (same-orientation overlap, three or more nets, a bridge over a pin/footprint/pad, or a
+        missing/doubled bridge marker) is a route_short.
     """
     violations: List[Violation] = []
     w, h = scenario.map_x, scenario.map_y
@@ -106,9 +110,20 @@ def drc(scenario: Scenario) -> List[Violation]:
         pad_owner[(pad.x, pad.y)] = pad.net
         pins_of_net.setdefault(pad.net, set()).add((pad.x, pad.y))
 
-    # Route checks: off-map, cutting foreign footprints, crossing foreign pads, and shorting
-    # another net's track. route_owner tracks which net first claimed each non-pin tile.
-    route_owner: Dict[Coord, str] = {}
+    # Precompute, per net, the tile->orientation classification of its route ("H" straight
+    # horizontal pass-through, "V" straight vertical, "X" endpoint/turn/branch) and the set of
+    # tiles it declares as bridges. A clean perpendicular crossing (the only legal way for two
+    # different nets to share a non-pin tile) needs one net horizontal-straight and the other
+    # vertical-straight at the tile, with exactly one of them recording it as a bridge.
+    orient_of: Dict[str, Dict[Coord, str]] = {}
+    bridges_of: Dict[str, Set[Coord]] = {}
+    for r in scenario.routes:
+        orient_of.setdefault(r.net, {}).update(_route_orientation(r.path))
+        bridges_of.setdefault(r.net, set()).update(set(r.bridges))
+
+    # Route checks: off-map, cutting foreign footprints, crossing foreign pads. Tile sharing is
+    # handled afterwards via the crossing rule, so first record which nets occupy each tile.
+    nets_on_route_tile: Dict[Coord, List[str]] = {}
     for r in scenario.routes:
         legal_pins = pins_of_net.get(r.net, set())
         for t in r.path:
@@ -127,13 +142,87 @@ def drc(scenario: Scenario) -> List[Violation]:
                     "route_cuts_pad",
                     f"net {r.net} route crosses {pad_owner[t]}'s IO pad at tile {t}"))
             if t not in legal_pins:
-                if t in route_owner and route_owner[t] != r.net:
-                    violations.append(Violation(
-                        "route_short",
-                        f"nets {route_owner[t]} and {r.net} share route tile {t}"))
-                else:
-                    route_owner[t] = r.net
+                nets_on_route_tile.setdefault(t, [])
+                if r.net not in nets_on_route_tile[t]:
+                    nets_on_route_tile[t].append(r.net)
+
+    # Tile sharing: a non-pin tile shared by two different nets is legal ONLY as a clean
+    # perpendicular bridge crossing. Anything else (same-orientation overlap, three+ nets, a
+    # bridge over a pin/footprint/pad, a missing or doubled bridge marker) is a route_short.
+    for t, nets in nets_on_route_tile.items():
+        if len(nets) < 2:
+            continue
+        if len(nets) > 2:
+            violations.append(Violation(
+                "route_short",
+                f"nets {sorted(nets)} all share route tile {t} (not a 2-net crossing)"))
+            continue
+        a, b = nets
+        oa = orient_of.get(a, {}).get(t, "X")
+        ob = orient_of.get(b, {}).get(t, "X")
+        # Exactly one straight-horizontal and one straight-vertical pass-through.
+        if not ((oa == "H" and ob == "V") or (oa == "V" and ob == "H")):
+            violations.append(Violation(
+                "route_short",
+                f"nets {a} and {b} share route tile {t} but it is not a clean perpendicular "
+                f"crossing (orientations {oa}/{ob})"))
+            continue
+        # The bridge tile must not be a pin/footprint/pad tile (it is carried over open ground).
+        if t in cell_tile_owner or t in pad_owner:
+            violations.append(Violation(
+                "route_short",
+                f"nets {a} and {b} cross at tile {t} which is a cell/pad tile"))
+            continue
+        # Exactly one of the two nets must record the tile as a bridge (the one carried over).
+        a_br = t in bridges_of.get(a, set())
+        b_br = t in bridges_of.get(b, set())
+        if a_br == b_br:
+            violations.append(Violation(
+                "route_short",
+                f"nets {a} and {b} cross at tile {t} but the bridge marker is "
+                f"{'missing' if not a_br else 'recorded by both'} "
+                f"(exactly one net must list it in bridges)"))
+            continue
+        # Legal: the horizontal (trunk) net should be the one carried over. We do not hard-fail
+        # if the vertical net recorded it instead (the data still unambiguously marks the
+        # crossing), but the construction always bridges the horizontal net.
+
+    # A bridge tile a net declares but does not actually share with a perpendicular net is a
+    # stale/false marker; flag it so bridges stay honest.
+    for r in scenario.routes:
+        for t in r.bridges:
+            nets = nets_on_route_tile.get(t, [])
+            others = [n for n in nets if n != r.net]
+            if not others:
+                violations.append(Violation(
+                    "route_short",
+                    f"net {r.net} declares a bridge at tile {t} with no perpendicular net "
+                    f"crossing there"))
     return violations
+
+
+def _route_orientation(path: List[Coord]) -> Dict[Coord, str]:
+    """Classify each path tile as straight-horizontal "H", straight-vertical "V", or "X".
+
+    A tile is a clean horizontal pass-through ("H") iff it has both a left and a right
+    path-neighbour and neither vertical neighbour; "V" is the vertical mirror. Endpoints,
+    turns, branches and 2-wide blobs come out as "X". This is the SAME definition the router
+    uses to mark bridges, so what the router bridges is exactly what the DRC accepts.
+    """
+    tiles = set(path)
+    orient: Dict[Coord, str] = {}
+    for (x, y) in path:
+        left = (x - 1, y) in tiles
+        right = (x + 1, y) in tiles
+        up = (x, y - 1) in tiles
+        down = (x, y + 1) in tiles
+        if left and right and not up and not down:
+            orient[(x, y)] = "H"
+        elif up and down and not left and not right:
+            orient[(x, y)] = "V"
+        else:
+            orient[(x, y)] = "X"
+    return orient
 
 
 def overlap_violations(scenario: Scenario) -> List[Violation]:

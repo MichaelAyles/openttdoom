@@ -35,7 +35,7 @@ for _d in (_HERE, os.path.join(_ROOT, "synth")):
 from netlist import Netlist
 from scenario import Scenario, IOPad, Framebuffer, Clock
 from place import place_cells, Placement
-from route import route_nets, RouteResult
+from channel_route import route_nets, RouteResult
 
 
 # Margin of empty tiles kept around the placed logic on the right/bottom for IO + routing.
@@ -43,61 +43,70 @@ RIGHT_MARGIN = 6
 BOTTOM_MARGIN = 4
 
 
-def _map_size(placement: Placement) -> tuple:
-    """Choose a square-ish map big enough for the logic plus IO margins.
-
-    OpenTTD map dimensions must be powers of two; we round up to the next power of two
-    that fits, clamped to a sensible floor so tiny circuits still get a 64x64 map.
-    """
-    need_w = placement.width_tiles + RIGHT_MARGIN
-    need_h = placement.height_tiles + BOTTOM_MARGIN
-
-    def pow2_at_least(n: int, floor: int = 64) -> int:
-        v = floor
-        while v < n:
-            v *= 2
-        return v
-
-    return pow2_at_least(need_w), pow2_at_least(need_h)
+def _pow2_at_least(n: int, floor: int = 64) -> int:
+    """Smallest power of two >= n, clamped to a floor (OpenTTD map dims are powers of two)."""
+    v = floor
+    while v < n:
+        v *= 2
+    return v
 
 
 def build_scenario(netlist: Netlist, name: str | None = None) -> tuple:
     """Place + route `netlist` into a Scenario. Returns (Scenario, RouteResult).
 
-    The RouteResult is returned alongside so callers (tests, CLI) can report routed-net
-    coverage and any unrouted nets honestly instead of hiding routing failures.
+    The channel router (channel_route.route_nets) WIDENS the placement in place and reports
+    the true routed extent and the final IO pad tiles, so we route first and size the map to
+    the routed extent afterwards. Input pads sit on the left edge (x = 0); output pads land
+    just past the widened logic (the router places them there and runs their risers out). The
+    RouteResult is returned alongside so callers (tests, CLI) can report coverage, bridges and
+    any unrouted nets honestly.
     """
     netlist.validate()
     placement = place_cells(netlist)
-    map_w, map_h = _map_size(placement)
 
-    # Assign IO pad tiles BEFORE routing so the router can run tracks out to them. Input
-    # pads sit on the left edge (x = 0), one per row; output pads on the right edge
-    # (x = map_w - 1), one per row. Routing then physically connects pad <-> logic, so the
-    # reconstruction check can follow the track from the framebuffer back to the gates.
-    io: List[IOPad] = []
-    input_pads: Dict[str, tuple] = {}
+    # Provisional pad rows: input pads down the left edge, output pads one per row. The router
+    # remaps the x of every pad into its widened coordinate system and returns the final tiles.
+    in_pads: Dict[str, tuple] = {}
     for i, port in enumerate(netlist.ports.inputs):
-        pad_y = min(i, map_h - 1)
-        io.append(IOPad(port=port, net=port, x=0, y=pad_y, kind="input"))
-        input_pads[port] = (0, pad_y)
-
-    out_x = map_w - 1
-    output_pads: Dict[str, tuple] = {}
-    fb_pixels: List[str] = []
+        in_pads[port] = (0, i)
+    out_pads: Dict[str, tuple] = {}
     for j, port in enumerate(netlist.ports.outputs):
-        pad_y = min(j, map_h - 1)
-        io.append(IOPad(port=port, net=port, x=out_x, y=pad_y, kind="output"))
-        output_pads[port] = (out_x, pad_y)
-        fb_pixels.append(port)
+        out_pads[port] = (placement.width_tiles + 1, j)
 
-    rr: RouteResult = route_nets(netlist, placement, map_w, map_h,
-                                 input_pads=input_pads, output_pads=output_pads)
+    rr: RouteResult = route_nets(netlist, placement, placement.width_tiles + 1,
+                                 placement.height_tiles,
+                                 input_pads=in_pads, output_pads=out_pads)
+
+    # Final pad tiles come back from the router (widened coordinates).
+    input_pads = rr.input_pads or in_pads
+    output_pads = rr.output_pads or out_pads
+
+    # Size the map to cover everything the router used (logic, risers, trunk band, pads).
+    need_w = max(rr.width_tiles, placement.width_tiles) + RIGHT_MARGIN
+    need_h = max(rr.height_tiles, placement.height_tiles) + BOTTOM_MARGIN
+    for (px, py) in list(input_pads.values()) + list(output_pads.values()):
+        need_w = max(need_w, px + 1 + RIGHT_MARGIN)
+        need_h = max(need_h, py + 1 + BOTTOM_MARGIN)
+    map_w, map_h = _pow2_at_least(need_w), _pow2_at_least(need_h)
+
+    io: List[IOPad] = []
+    for port in netlist.ports.inputs:
+        px, py = input_pads[port]
+        io.append(IOPad(port=port, net=port, x=px, y=py, kind="input"))
+    fb_pixels: List[str] = []
+    out_x = 0
+    for port in netlist.ports.outputs:
+        px, py = output_pads[port]
+        io.append(IOPad(port=port, net=port, x=px, y=py, kind="output"))
+        fb_pixels.append(port)
+        out_x = px
 
     framebuffer = None
     if fb_pixels:
+        # Output pads share a column (the router lines them up at out_x), one row per pixel.
+        fb_y0 = min(output_pads[p][1] for p in netlist.ports.outputs)
         framebuffer = Framebuffer(
-            origin_x=out_x, origin_y=0, w=1, h=len(fb_pixels),
+            origin_x=out_x, origin_y=fb_y0, w=1, h=len(fb_pixels),
             pixel_nets=fb_pixels)
 
     scen = Scenario(
