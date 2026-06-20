@@ -1,0 +1,18 @@
+# large pulled dependencies (reproduced by scripts/setup.sh)
+vendor/openttd/
+vendor/doom/
+vendor/chip8/
+*.tar.xz
+*.zip
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# generated artifacts
+*.sav
+golden/out/
+synth/out/
+place_and_route/out/
