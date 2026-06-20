@@ -5,13 +5,14 @@ exact failure where there is one, and the concrete next step. Plain tone, no em-
 
 The short version: everything that can be proven in software is proven (see STATUS.md), and the
 single hardest piece the brief flagged, a logic gate that actually computes inside OpenTTD, is
-now SOLVED and independently verified (a 2-input NOR, truth table 1,0,0,0, confirmed via an
-alternate readout channel). What remains is composing many gates into the clocked machine: the
-clock train, gate-to-gate chaining with one-edge latency, framebuffer readout, and folding the
-gate geometry into the place-and-route emitter. Those are engineering on a working foundation,
-not unknowns.
+SOLVED and independently verified (a 2-input NOR, truth table 1,0,0,0). Gate COMPOSITION is now
+also verified in game: a two-gate chain computes OR(a,b) = NOT(NOR(a,b)), readout
+`OR s40 39 41 41 41` giving 0,1,1,1 = OR (scenarios/norchain_gs/). What remains is the CLOCK train
+(both chains so far are run on demand, not sampled on a shared periodic edge), the one-edge
+latency, framebuffer readout, and folding the gate geometry into the place-and-route emitter.
+Those are engineering on a working foundation, not unknowns.
 
-## 1. The physical OpenTTD NOR gate geometry. SOLVED for a single combinational gate.
+## 1. The physical OpenTTD NOR gate geometry. SOLVED for a single combinational gate AND a 2-gate chain.
 
 RESOLVED (the single-gate part). A single NOT (one-input NOR) and a single 2-input NOR were
 built in OpenTTD 15.3 and PROVEN to compute by poking the input(s) and watching the output
@@ -51,22 +52,36 @@ Exact geometry, the verbatim truth tables, and the run procedure are in
 `scenarios/norgate_gs/readme.txt`. The gate is reproduced by running scenarios/norgate_gs/ (or the relay-independent
 main_verify_byname.nut) on a fresh dedicated server.
 
+NOW ALSO RESOLVED: gate COMPOSITION. A two-gate chain computing OR(a,b) = NOT(NOR(a,b)) was built
+and verified in game (`scenarios/norchain_gs/`). Gate 1 (a 2-input NOR of a,b) feeds gate 2 (a NOT):
+gate 1's reader, when it passes (output 1), is frozen on a coupling tile CPLX that is joined by a
+signal-free spur into gate 2's input block, so gate 1's output physically parks a train in gate 2's
+input; gate 2's reader then passes iff gate 1 did not. A fresh dedicated-server run, read via the
+company name, returned `OR s40 39 41 41 41` (SIG2X=40, reader x>40 == OR 1). Judged from the RAW
+positions: 00->39 (OR 0), 01/10/11->41 (OR 1) = 0,1,1,1 = OR(a,b), exactly. INDEPENDENTLY RE-VERIFIED by the orchestrator in a third fresh dedicated-server run: same readout `OR s40 39 41 41 41`, with live intermediates `c00 42/39` (gate1 passed, gate2 held) and `c01 35/41` (gate1 held, gate2 passed), judged from the raw positions to 0,1,1,1 = OR. The output bits come only from GSMap.GetTileX of the gate2 reader trains; there is no Squirrel-side OR/AND (source audited). Two facts were the crux,
+both isolated empirically (norchain_gs/main_diag3.nut): the dead-end "hold" signal does NOT cleanly
+park the passing reader, so it is parked by freezing it the moment its x reaches CPLX; and tearing
+trains down between cases on the coupled junction hangs the script, so each of the four cases is a
+SEPARATE chain copy at its own band of rows, with no teardown.
+
 STILL OPEN (the rest of the machine), now resting on a verified foundation:
   - Multi-input NOR with 3+ inputs (the 2-input case is proven; wider fan-in is the same idea,
     all taps in one protected block, but was not built/verified here).
-  - The clock train. The verified gate is combinational (a reader is run on demand). The
+  - The clock train. The verified gates are combinational (readers are run on demand). The
     synchronous design needs a clock that releases reader sampling on a shared edge so a chain
-    settles predictably. Not built.
-  - Composition: feeding one gate's output (a parked output train) into the next gate's input
-    block, and the one-edge register latency. Not built.
+    settles predictably with one edge of latency. NOT built (the 2-gate chain runs the two
+    readers sequentially on demand, not on a shared clock edge).
+  - Teardown / re-running gates in place. The chain sidesteps this by building a fresh copy per
+    case; a clocked machine that re-evaluates the SAME tiles each edge still needs a reliable way
+    to reset reader trains on a coupled junction without the script hanging.
   - Wiring the per-net output train-presence into the framebuffer signal tiles for the viewer.
   - Folding this geometry into `scenarios/openttdoom_gs/main.nut::StampCell` (still a placeholder)
     so the place-and-route pipeline stamps computing cells, not just visible structure.
 
-Concrete next step: extend the proven `norgate_gs` construction to chain two NOR gates (output
-train of gate 1 parked in the input block of gate 2) and add a clock train, then verify a 2-gate
-chain computes with one edge of latency. The single-gate geometry and the observability trick
-are now known and working.
+Concrete next step: add a clock train (a train on a small loop producing a periodic edge) and make
+the readers sample on that shared edge, so a chain settles with one edge of latency (matching
+scenarios/gate_model.py). The single-gate geometry, the observability trick, and now gate
+composition are known and working.
 
 ## 2. GameScript runtime and observability. MOSTLY RESOLVED, with one caveat.
 

@@ -53,7 +53,7 @@ Total test count: 80 passing (`python -m pytest -q`).
   Timendus 5-quirks ROM that would show it is not vendored). vf_reset is covered by the unit
   tests `test_8xy1_or_vf_reset` and `test_8xy2_and_vf_reset_off` instead.
 
-### M2, one working gate. DONE for NOT and 2-input NOR, verified in game. The clock, chaining and multi-gate composition remain.
+### M2, one working gate plus gate composition. DONE for NOT, 2-input NOR, and a 2-gate OR chain, verified in game. The clock remains.
 
 - `scenarios/GATE_DESIGN.md` is the design and research note: how a clocked NOR is meant to
   be realised from track, signals (block, two-way, entry/exit/combo presignals) and a clock
@@ -105,9 +105,30 @@ Total test count: 80 passing (`python -m pytest -q`).
   held (x <= 46) for 01/10/11. Applying NOR(a,b) = (reader passed) to the RAW positions gives
   1,0,0,0 = NOR, judged by the orchestrator, not by the GameScript. So the gate genuinely
   computes, confirmed independently of the agent's own logging and pass/fail computation.
-  STILL OPEN: the clock train (this gate is run on demand, not clock-sampled), chaining one
-  gate's output into the next gate's input, the one-edge register latency, and the framebuffer
-  readout. These now build on a working, verified foundation rather than an unknown.
+  NOW ALSO VERIFIED IN GAME: gate COMPOSITION, a TWO-GATE CHAIN computing
+  OR(a,b) = NOT(NOR(a,b)). `scenarios/norchain_gs/` builds gate 1 (a 2-input NOR of primary
+  inputs a,b) feeding gate 2 (a NOT, a one-input NOR), so gate2 = NOT(NOR(a,b)) = OR. Gate 1's
+  reader, when it PASSES (output 1, both inputs absent), is frozen on a coupling tile CPLX that
+  is joined by a signal-free spur into gate 2's input block, so "gate1 output = 1" physically
+  parks a train in gate 2's input block; when gate 1 is held (output 0) nothing reaches CPLX.
+  Gate 2's reader then passes iff its input block is empty iff gate 1 did not pass. Verified by a
+  fresh dedicated-server run, read via the company name (`rcon companies`), encoding the four
+  gate-2 reader final x: readout `OR s40 39 41 41 41` (SIG2X=40; reader x>40 == passed == OR 1).
+  Judged from the RAW positions: 00->g2=39<=40 (OR 0), 01->41, 10->41, 11->41 (all >40, OR 1),
+  giving 0,1,1,1 = OR(a,b), exactly. The per-case live names also showed gate 1 working inside
+  the chain: gate1 reader parked at CPLX=42 only for inputs 00 and was held at x=35 for
+  01/10/11, i.e. NOR = 1,0,0,0. So both gates compute and gate 1's output drives gate 2's input.
+  Two engineering facts were the crux (both isolated empirically, see norchain_gs/main_diag3.nut):
+  a dead-end "hold" signal does NOT cleanly park the passing reader (it gets held a tile early),
+  so the reader is parked by freezing it (StartStopVehicle) the moment its x reaches CPLX; and
+  tearing trains down between cases on the coupled junction hangs the script (a restarted reader
+  loops at the spur), so each of the four cases is built as an INDEPENDENT chain copy at its own
+  band of rows, with no teardown. Also confirmed: long company names silently fail to set (a
+  length limit), so the readout is kept short.
+  STILL OPEN: the clock train (both readers are still run on demand, not sampled on a shared
+  periodic edge) and the one-edge register latency; the framebuffer readout; and folding the
+  geometry into the place-and-route emitter. The chain now rests on a working, verified
+  composition rather than an unknown.
 
 ### M3, toolchain spine. DONE, verified in software.
 
