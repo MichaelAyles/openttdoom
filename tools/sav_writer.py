@@ -186,8 +186,32 @@ class Sav:
             f.write(self.data)
 
 
-def stamp_scenario(sav: Sav, scenario, owner: int = 0) -> tuple:
-    """Lay rail for every cell footprint and route tile. Returns (stamped, skipped)."""
+def _route_trackbits(path):
+    """Per-tile track bits for a route path: X for a horizontal step, Y for a vertical step.
+
+    A tile that both enters and leaves along the same axis gets that axis's single track; a
+    corner (axis changes) gets a cross so the two segments still connect. This makes long runs
+    render as clean straight rail up close instead of a plus on every tile.
+    """
+    bits = {}
+    for k, (x, y) in enumerate(path):
+        axes = 0
+        if k > 0:
+            px, py = path[k - 1]
+            axes |= TRACK_BIT_X if py == y else TRACK_BIT_Y
+        if k < len(path) - 1:
+            nx, ny = path[k + 1]
+            axes |= TRACK_BIT_X if ny == y else TRACK_BIT_Y
+        bits[(x, y)] = axes or TRACK_BIT_CROSS
+    return bits
+
+
+def stamp_scenario(sav: Sav, scenario, owner: int = 0, directional: bool = False) -> tuple:
+    """Lay rail for every cell footprint and route tile. Returns (stamped, skipped).
+
+    directional=True lays single-axis track along straight route runs (cleaner close up);
+    otherwise every tile is a cross (denser, clearer on a zoomed-out minimap).
+    """
     stamped = skipped = 0
     for c in scenario.cells:
         for (x, y) in c.occupied():
@@ -196,8 +220,10 @@ def stamp_scenario(sav: Sav, scenario, owner: int = 0) -> tuple:
             else:
                 skipped += 1
     for r in scenario.routes:
+        tb = _route_trackbits(r.path) if directional else None
         for (x, y) in r.path:
-            if sav.rail(x, y, TRACK_BIT_CROSS, owner):
+            bits = tb[(x, y)] if tb else TRACK_BIT_CROSS
+            if sav.rail(x, y, bits, owner):
                 stamped += 1
             else:
                 skipped += 1
@@ -213,6 +239,8 @@ def main() -> int:
     ap.add_argument("--size", type=int, default=0, help="override map width in tiles")
     ap.add_argument("--flatten", action="store_true",
                     help="level the map and remove water for a plain canvas")
+    ap.add_argument("--directional", action="store_true",
+                    help="single-axis track along straight runs (cleaner close up)")
     a = ap.parse_args()
 
     from scenario import Scenario
@@ -244,7 +272,7 @@ def main() -> int:
     if a.flatten:
         conv = sav.flatten()
         print(f"flattened canvas: {conv} water tiles converted to grass")
-    stamped, skipped = stamp_scenario(sav, sc)
+    stamped, skipped = stamp_scenario(sav, sc, directional=a.directional)
     sav.save(a.out)
     note = f", {skipped} skipped (non-clear tiles, e.g. water)" if skipped else ""
     print(f"stamped {stamped} rail tiles into {a.out} (map width {sav.size_x}){note}")
