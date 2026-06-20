@@ -75,54 +75,44 @@ company and borrow it, or have the scenario found a company first, or investigat
 deity-built or town-owned rail is acceptable for a pure-logic map where the economy is
 irrelevant. Documented as `TODO(human)` in `main.nut`.
 
-## 4. The router does not reach 100% on multi-bit adders.
+## 4. GameScript bridge construction detail. (Routing itself is now solved.)
 
-Blocked: full physical routing. The crude maze router routes about 77 of 101 nets on the
-4-bit adder (DRC clean, no shorts, logic verified). Unrouted nets are recorded honestly in
-`RouteResult.unrouted` and surfaced by `unrouted_nets()`. This is a completeness gap, not a
-correctness one: logical equivalence is independent of routing completeness, and the brief
-explicitly allows crude routing.
+The routing completeness problem is RESOLVED. The old maze router topped out near 77 of 101
+nets on the 4-bit adder. The cause was topological, not a weak heuristic: a 4-bit adder is not
+planar, so some wire crossings are unavoidable, and a tile-disjoint (no-crossing) router can
+never reach 100 percent. OpenTTD crosses tracks with bridges, so the router was replaced with a
+deterministic channel router (`place_and_route/channel_route.py`) that crosses nets only as
+perpendicular bridges. All adders now route to 100 percent, DRC clean, logic preserved (the
+4-bit adder uses 1958 bridge crossings on a 1024x256 map). The bridge tiles are carried in
+`Route.bridges` and flow through `Scenario.to_nut()` to the GameScript.
 
-What was tried (by the place-and-route build, in order): plain greedy Lee/BFS; escape-tile
-pin reservations; channel widening and demand-sized channels; barycenter row placement;
-negotiated-congestion (Pathfinder-style history penalty, the best general result); rip-up and
-reroute (made it worse, cascading rips, reverted); a deterministic per-net dedicated-track
-router (0 shorts but low coverage on far-column consumers, removed). A later probe doing
-repeated legalisation orders on the 4-bit adder's 1024x256 map ran over 90s with no result,
-so router experimentation thrashes at this size and was stopped to protect the correctness
-fixes.
+What remains (the in-game build detail): `scenarios/openttdoom_gs/main.nut::LayBridge` calls
+`GSBridge.BuildBridge` for each bridge tile, but the exact bridge type selection, the head and
+ramp tile orientation, and the one-way signal placement that keeps the carried track moving need
+in-game calibration. The crossing data is computed and correct; turning each crossing into a
+built bridge with the right ramps is the open piece, and it depends on the same gate and clock
+timing that blocker 1 is about. Marked `TODO(human)` in `main.nut`.
 
-Concrete next step: a proper channel / track-assignment router. The placement already
-guarantees strict left-to-right signal flow with clear footprint-free gap rows and columns, so
-assign each net its own vertical track column and horizontal highway row in those gaps. This
-is a from-scratch rewrite of `place_and_route/route.py` and should be its own task with its
-own test budget.
+## 5. The full yosys NOR techmap. RESOLVED.
 
-## 5. The full yosys NOR-liberty techmap.
+The proper "read verilog, synth, techmap to NOR" flow now works. A full yosys from oss-cad-suite
+is installed, and `synth/yosys_synth.py` runs it end to end: it emits `synth/adder4.v` from the
+behavioural amaranth `Adder4`, runs `synth/adder4.ys`, and imports the result. yosys techmaps the
+adder to 62 buildable cells (NOR plus NOT, where NOT is a one-input NOR), which adds over all 512
+input combinations and is `equivalent()` to the Python `to_nor()` netlist (yosys abc is tighter,
+62 vs 92 cells). `synth/test_yosys.py` checks this and skips cleanly when yosys is absent.
 
-Blocked: the classic "read verilog, synth, `abc -liberty nor.lib`" flow that maps an adder to
-a NOR-only cell library with a real yosys.
+One environment wrinkle, handled: this Windows yosys build's liberty-to-genlib conversion fails
+("merged SCL conversion failed"), so the script maps with abc's built-in NOR set (`abc -g NOR`)
+rather than `abc -liberty synth/nor.lib`. Same buildable result. `synth/nor.lib` is kept for
+yosys builds where the liberty path works. The tool-free Python `to_nor()` remains the default
+so the core pipeline needs no external tools.
 
-Why: the only yosys reachable here is the WASM build bundled with `amaranth-yosys`
-(pip-installed, 0.50). It is stripped: no `read_verilog`, no `techmap`, no `abc`, no `synth`
-(confirmed, `read_verilog` returns "No such command"). It can read amaranth RTLIL, run
-opt/simplemap, and write JSON, nothing more.
+## 6. An OpenTTD source build is not done here (no C/C++ compiler).
 
-What was achieved instead: the WASM yosys does a genuine gate-level decomposition of a
-bit-level adder (8 XOR, 8 AND, 4 OR cells), which is imported and verified over all 512 combos
-as a cross-check. The final NOR techmap is done by `Netlist.to_nor()` in Python, which is
-exact and exhaustively verified. So the buildable NOR netlist is real and correct, it just
-does not come from a yosys techmap.
-
-Concrete next step: `synth/adder4.ys` is the complete proper-yosys script with the NOR liberty
-snippet inline and run instructions, marked `TODO(human)`. Run it under a full yosys from the
-oss-cad-suite bundle (URL in `scripts/setup.sh`). Its output should be `equivalent()` to
-`synth/out/adder4_nor.json`.
-
-## 6. yosys, verilator and an OpenTTD source build are not installed here.
-
-Not a blocker, a recorded environment fact. This machine has no C or C++ compiler, so OpenTTD
-was not built from source (we use the prebuilt binary) and verilator is absent. yosys proper
-is absent too (only the stripped WASM one above). The verified pipeline does not depend on any
-of them. `scripts/setup.sh` documents the oss-cad-suite bundle (yosys plus verilator) and the
-CMake source-build steps for a human who wants the full toolchain.
+A recorded environment fact, not a blocker. This machine has no C or C++ compiler, so OpenTTD was
+not built from source; we use the prebuilt binary, which satisfies M0 (headless start with
+OpenGFX). yosys and verilator ARE now available (oss-cad-suite, see blocker 5), so the only piece
+of the brief's toolchain that needs a compiler is a from-source OpenTTD build, and that is only
+needed for the speed fork, which is explicitly out of scope. `scripts/setup.sh` documents the
+CMake source-build steps for a human who wants them.

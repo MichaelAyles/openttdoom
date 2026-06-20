@@ -26,3 +26,6 @@ golden/out/*
 # stray probe/temp files
 tmp_*.json
 *.tmp
+
+# generated verilog (emitted from amaranth by yosys_synth.py)
+synth/adder4.v

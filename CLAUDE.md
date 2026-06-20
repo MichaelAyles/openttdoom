@@ -57,12 +57,15 @@ Stage notes:
 - `golden/` is the M1 oracle: a complete CHIP-8 interpreter (`chip8.py`) plus a headless PNG
   viewer (`viewer.py`), checked against the Timendus reference ROMs by exact framebuffer hash.
 - `hdl/` is the Amaranth frontend (behavioural `Adder4` plus a structural `build_adder4_netlist`).
-- `synth/` lowers to a buildable NOR netlist. The verified path is the Python `to_nor()`, not
-  yosys. yosys is optional: only a stripped WASM yosys is reachable here, the full
-  verilog-to-NOR techmap is parked in `synth/adder4.ys` as `TODO(human)`.
-- `place_and_route/` places, routes (a crude maze router, unrouted nets recorded honestly),
-  emits the scenario, and checks it (`check.py`: DRC, `scenario_to_netlist` reconstruction,
-  `verify_equivalence`).
+- `synth/` lowers to a buildable NOR netlist. The default verified path is the tool-free Python
+  `to_nor()`. When a full yosys (oss-cad-suite) is installed, `synth/yosys_synth.py` also runs
+  the real verilog to NOR techmap (`synth/adder4.ys`) and `synth/test_yosys.py` checks it
+  equivalent (it skips when yosys is absent).
+- `place_and_route/` places cells, then routes every net with a complete channel router
+  (`channel_route.py`) that crosses nets as perpendicular bridges (`Route.bridges`), emits the
+  scenario, and checks it (`check.py`: DRC including the bridge-crossing rule,
+  `scenario_to_netlist` reconstruction, `verify_equivalence`). Note `route.py` was the old maze
+  router and has been removed.
 - `scenarios/openttdoom_gs/` is the OpenTTD GameScript. This is the M2 hard piece: the build
   mechanism (Squirrel over binary savegame) is chosen and the data walk is real, but the
   actual NOR gate tile geometry is unsolved and marked `TODO(human)`. See `GATE_DESIGN.md`.
@@ -70,11 +73,12 @@ Stage notes:
 ## Where the project stands
 
 M0 and M1 are done and verified. M3 (the toolchain) is verified in software. M4 (the 4-bit
-adder) closes through the whole pipeline in software (synth to scenario, logic preserved at
-every step). The one thing that does not close is the physical OpenTTD gate: the exact track
-and signal geometry of a computing NOR tile is the open research problem. That, the
-GameScript runtime verification, the deity/company build-context, and the channel router are
-the four things handed to the human. Details and file pointers are in STATUS.md and STUCK.md.
+adder) closes through the whole pipeline in software: synthesised to 92 NOR cells, placed, and
+fully routed (101 of 101 nets, 0 DRC violations, via perpendicular bridges), with the logic
+preserved at every step. The one thing that does not close is the physical OpenTTD gate: the
+exact track and signal geometry of a computing NOR tile is the open research problem. That, the
+GameScript runtime verification, the deity/company build-context, and the in-game bridge build
+detail are what is handed to the human. Details and file pointers are in STATUS.md and STUCK.md.
 
 ## Out of scope this run (roadmap only, see README.md)
 

@@ -37,8 +37,9 @@ Stage by stage:
   would produce. yosys itself is optional here, see "Verified vs stubbed".
 - **place_and_route/**  Takes a netlist and produces a `Scenario`: a fully spatial layout
   where every cell has a footprint and a tile position, every net is a routed track path,
-  and the primary inputs and outputs are pads at known tiles. Routing is allowed to be
-  crude.
+  and the primary inputs and outputs are pads at known tiles. The channel router routes every
+  net (100 percent on the adders), crossing nets where needed as perpendicular bridges, which
+  is how OpenTTD crosses two tracks.
 - **scenarios/**  The emitter turns a placed `Scenario` into a Squirrel data table
   (`scenario_data.nut`) via `Scenario.to_nut()`. A GameScript reads that table on load and
   stamps the track, signals and trains onto the map. This dodges the binary savegame
@@ -108,10 +109,12 @@ Verified in this environment:
 
 Stubbed or optional, not relied on here:
 
-- **yosys and verilator are not installed.** The synth flow uses the self-contained Python
-  NOR lowering (`Netlist.to_nor`) instead of a real yosys techmap, so the verified pipeline
-  does not depend on them. A human can add them via the oss-cad-suite bundle. See
-  `scripts/setup.sh`.
+- **yosys is optional, and now wired up.** The synth flow has a self-contained Python NOR
+  lowering (`Netlist.to_nor`) that needs no external tools and is the default. When a full
+  yosys (oss-cad-suite) is installed, `synth/yosys_synth.py` also runs the proper verilog to
+  NOR techmap and `synth/test_yosys.py` checks it equivalent to the Python flow. verilator is
+  available from the same bundle. See `scripts/setup.sh`. Neither is required for the core
+  pipeline.
 - **Building OpenTTD from source is not done here**, because this environment has no C or
   C++ compiler. We use the prebuilt binary. The CMake build steps a human would run are
   noted as a comment in `scripts/setup.sh`.

@@ -70,15 +70,26 @@ echo "  binary: ${OPENTTD_DIR}/openttd.exe"
 echo "  opengfx: ${OPENGFX_TAR}"
 echo "  run the headless smoke test with: bash scripts/run_headless.sh"
 
-# --- OPTIONAL: yosys + verilator (NOT installed in this environment) -------------
-# The synth/ flow uses a self-contained Python NOR lowering (Netlist.to_nor), so the
-# verified pipeline here does NOT depend on yosys or verilator. A human who wants the
-# real yosys techmapping flow can grab the oss-cad-suite bundle, which ships both:
+# --- OPTIONAL: yosys + verilator via oss-cad-suite -------------------------------
+# The synth/ flow has a self-contained Python NOR lowering (Netlist.to_nor), so the core
+# pipeline does NOT require yosys. But the PROPER verilog -> techmap -> NOR synthesis path
+# (synth/adder4.ys, driven by synth/yosys_synth.py) DOES run when a full yosys is installed,
+# and synth/test_yosys.py then checks its result equivalent to the Python flow. oss-cad-suite
+# ships both yosys and verilator.
 #
-#   https://github.com/YosysHQ/oss-cad-suite-build/releases
+# This was installed and is in use here. Install it the same way (kept OUT of the repo tree,
+# the bundle is ~2 GB and the repo may live in a cloud-synced folder):
 #
-# Download the bundle for your OS, unpack it, and add its bin/ to PATH. After that
-# yosys and verilator are on the path and the optional yosys scripts can run.
+#   OCS_URL=$(curl -sS https://api.github.com/repos/YosysHQ/oss-cad-suite-build/releases/latest \
+#     | grep browser_download_url | sed 's/.*: "//;s/"//' | grep -i 'windows-x64.*\.exe')
+#   curl -fL "$OCS_URL" -o "$HOME/ossbuild/osscad.exe"
+#   "/c/Program Files/7-Zip/7z.exe" x "$HOME/ossbuild/osscad.exe" -o"$HOME/ossbuild" -y
+#   # -> $HOME/ossbuild/oss-cad-suite/bin/yosys.exe (+ verilator_bin.exe)
+#
+# synth/yosys_synth.py auto-detects it at $OSS_CAD_SUITE_ROOT, ~/ossbuild/oss-cad-suite,
+# ~/oss-cad-suite, C:/oss-cad-suite, or on PATH. On the Windows build, point TEMP at a clean
+# dir and add the suite's lib/ to PATH for the bundled DLLs (yosys_synth.prepare_env does this).
+# On Linux/macOS, grab the matching oss-cad-suite bundle and put its bin/ on PATH.
 
 # --- OPTIONAL: build OpenTTD from source with CMake ------------------------------
 # We did NOT do this here because there is no C/C++ compiler in this environment.

@@ -4,11 +4,17 @@ End-of-run status for openttdoom. What works, what is stubbed, and where the har
 problems sit. Plain tone, no em-dashes. The isolated blockers are in STUCK.md.
 
 This run stood up the toolchain spine (M0 to M4) and pushed the 4-bit adder as far as
-software verification can take it. The whole pipeline closes in software. The one thing
-that does not close is the physical OpenTTD gate, which is the research problem the brief
-flagged as hardest, and it is isolated cleanly for the human.
+software verification can take it. The whole pipeline closes in software, with the adder
+fully placed AND fully routed. The one thing that does not close is the physical OpenTTD
+gate, which is the research problem the brief flagged as hardest, and it is isolated cleanly
+for the human.
 
-Total test count: 75 passing (`python -m pytest -q`).
+Two of the four originally-isolated blockers were then closed (see the history at the bottom):
+routing now reaches 100 percent via perpendicular bridge crossings, and a full yosys
+(oss-cad-suite) now runs the proper verilog to NOR synthesis, verified equivalent to the
+Python flow. The remaining blockers are the physical gate geometry and the GameScript runtime.
+
+Total test count: 80 passing (`python -m pytest -q`).
 
 ## Milestone by milestone
 
@@ -74,28 +80,34 @@ Total test count: 75 passing (`python -m pytest -q`).
   `to_nor()` lowering to the buildable set, and JSON IO. `equivalent()` compares by truth
   table and is port-order independent.
 - `synth/synth.py` emits `synth/out/adder4.json` (structural, 82 NOR) and
-  `synth/out/adder4_nor.json` (lowered buildable, 92 NOR). A real WASM yosys (amaranth-yosys)
-  is reachable and is used as a cross-check that genuinely decomposes a bit-level adder to
-  gate cells. The full verilog-to-NOR-liberty yosys techmap needs a complete yosys and is
-  parked in `synth/adder4.ys` as `TODO(human)`. See STUCK.md and the deviation below.
+  `synth/out/adder4_nor.json` (lowered buildable, 92 NOR). The proper full yosys path now
+  works: with a complete yosys (oss-cad-suite), `synth/yosys_synth.py` runs the real verilog
+  to techmap to NOR flow (`synth/adder4.ys`) and produces a 62-cell NOR netlist that adds over
+  all 512 combos and is `equivalent()` to the Python flow (yosys abc is tighter, 62 vs 92
+  cells). `synth/test_yosys.py` checks this and skips cleanly when yosys is absent. The Python
+  `to_nor()` lowering remains the tool-free verified default.
 - `place_and_route/` places cells on a grid (footprint sized to fan-in so wide NOR inputs get
-  distinct tiles), routes nets with a crude negotiated-congestion maze router, emits a
-  `Scenario` (JSON plus the `.nut` data table), and checks it: `drc()` catches overlaps,
-  shorts, off-map tiles and pin collisions; `scenario_to_netlist()` reconstructs the logic
-  from the placed cells and routes; `verify_equivalence()` proves the placement preserved the
-  function. Routing is allowed to be crude and unrouted nets are recorded honestly.
+  distinct tiles), then routes every net with a deterministic, complete channel router
+  (`channel_route.py`): each net gets a unique horizontal trunk row and unique-column vertical
+  risers, and where two nets must cross they do so as a perpendicular BRIDGE (one carried over
+  the other), which is how OpenTTD crosses signals. It emits a `Scenario` (JSON plus the
+  `.nut` data table) and checks it: `drc()` catches overlaps, off-map tiles, pin collisions,
+  and any non-bridge short (a same-orientation overlap can never be laundered as a bridge);
+  `scenario_to_netlist()` reconstructs the logic from the placed cells and routes;
+  `verify_equivalence()` proves the placement preserved the function. The 1, 2 and 4-bit
+  adders now route to 100 percent with zero DRC violations.
 
 ### M4, the 4-bit adder end to end. CLOSES IN SOFTWARE. The OpenTTD realisation is blocked on M2.
 
 Running the whole pipeline on the 4-bit ripple-carry adder:
 
 1. Synthesised netlist: 92 NOR cells, buildable-only, computes a+b+cin correctly on all
-   512 input combinations.
-2. Place and route: all 92 cells placed, 0 DRC violations, 77 of 101 nets physically routed
-   (24 unrouted, recorded honestly, see STUCK.md on the router).
+   512 input combinations. (A full yosys produces an equivalent 62-cell version.)
+2. Place and route: all 92 cells placed and all 101 nets routed (100 percent), 0 DRC
+   violations, on a 1024x256 map, using 1958 perpendicular bridge crossings.
 3. Reconstruction from the emitted scenario (reading back the placed cells and routes):
-   `verify_equivalence` is True and the reconstructed netlist computes a+b+cin on all 512
-   combinations.
+   `verify_equivalence(require_routed=True)` is True and the reconstructed netlist computes
+   a+b+cin on all 512 combinations.
 
 So the design closes from Amaranth down to a loadable scenario and the logic is preserved at
 every step, verified in software. The scenario and GameScript data are emitted
@@ -110,14 +122,37 @@ M4 ("build the whole pipeline and isolate the exact blocker"), and it is isolate
    `scenarios/openttdoom_gs/main.nut` (the `TODO(human)` markers in `StampCell`). STUCK.md #1.
 2. Running and verifying the GameScript in OpenTTD, plus the company build-context.
    `scenarios/openttdoom_gs/readme.txt`, `main.nut::PickCompany`. STUCK.md #2 and #3.
-3. The router does not reach 100% on multi-bit adders. `place_and_route/route.py`. STUCK.md #4.
-4. The full yosys NOR-liberty techmap. `synth/adder4.ys`. STUCK.md #5.
+3. The GameScript bridge construction detail (bridge type, ramp/head tiles, one-way signals).
+   The crossings are computed and flow through the data; building them in game needs
+   calibration. `scenarios/openttdoom_gs/main.nut::LayBridge`. STUCK.md #4.
+
+Resolved this run (were blockers, now closed): complete routing via bridges, and the proper
+full-yosys NOR synthesis. See the history section below.
 
 ## Deviations from the brief, all documented
 
 - Prebuilt OpenTTD binary instead of a CMake source build (no compiler here).
 - Timendus reference ROMs instead of a c-octo cross-check (no compiler here).
-- `amaranth-yosys` and `wasmtime` were pip-installed at runtime for the optional yosys
-  cross-check. The verified pipeline does not depend on them; they self-skip if absent.
-- yosys and verilator proper are not installed (the structural Python path is the verified
-  one). `scripts/setup.sh` documents the oss-cad-suite bundle for a human who wants them.
+- A full yosys and verilator (oss-cad-suite) were installed outside the repo tree and are now
+  used by the optional yosys path. They are kept out of `vendor/` on purpose (the bundle is
+  ~2 GB and this tree may be cloud-synced); `synth/yosys_synth.py` auto-detects them and the
+  whole flow skips cleanly when they are absent. The tool-free Python path stays the default.
+  `scripts/setup.sh` documents the install.
+
+## History, extensions after the M4 review gate
+
+The brief's stop point was the M4 gate, with four blockers isolated. Two were then closed:
+
+- Complete routing. The maze router topped out at 77 of 101 nets on the 4-bit adder. The cause
+  was topological, not a weak heuristic: a 4-bit adder netlist is not planar, so some wire
+  crossings are unavoidable, and a tile-disjoint (no-crossing) router can never reach 100
+  percent. OpenTTD crosses tracks with bridges, so the router was replaced with a deterministic
+  channel router (`place_and_route/channel_route.py`) that crosses nets as perpendicular
+  bridges. All adders now route to 100 percent, DRC clean, logic preserved. The bridges flow
+  through to the GameScript (`main.nut::LayBridge`).
+- Proper yosys synthesis. A full yosys (oss-cad-suite) was installed, so `synth/adder4.ys`
+  now runs for real (`synth/yosys_synth.py`): verilog to techmap to NOR, giving a 62-cell NOR
+  netlist equivalent to the Python flow. verilator (5.049) is available too.
+
+Still open after these: the physical gate geometry (STUCK.md #1), the GameScript runtime and
+company context (STUCK.md #2, #3), and the in-game bridge construction detail (STUCK.md #4).
