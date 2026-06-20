@@ -12,7 +12,7 @@ How it works (and why it is robust):
     so no chunk needs reframing and the rest of the save is untouched.
   - Each tile spans several arrays: type/MAPT, owner/MAPO (m1), m2/MAP2 (u16), m3/M3LO, m4/M3HI,
     m5/MAP5, m6/MAPE, m7/MAP7, m8/MAP8 (u16). A plain rail tile is (per rail_map.h MakeRailNormal):
-      type high nibble = MP_RAILWAY (2);  m1 = owner;  m5 = RailTileType::Normal(0)<<6 | trackbits;
+      type high nibble = MP_RAILWAY (1);  m1 = owner;  m5 = RailTileType::Normal(0)<<6 | trackbits;
       m8 = rail type (0);  m2=m3=m4=m7=0;  m6 high bits 0.
     Track bits: X axis (NE-SW) = 1, Y axis (NW-SE) = 2, cross = 3 (track_type.h).
 
@@ -230,9 +230,51 @@ def stamp_scenario(sav: Sav, scenario, owner: int = 0, directional: bool = False
     return stamped, skipped
 
 
+def stamp_framebuffer(sav: Sav, frame, origin_x: int, origin_y: int,
+                      scale: int = 8, owner: int = 0) -> int:
+    """Stamp a CHIP-8 framebuffer onto the map as a grid of tiles.
+
+    `frame` is a 2D numpy array of 0/1 with rows=height, cols=width (the chip8.display
+    layout). Each LIT pixel (1) becomes a scale x scale solid block of rail tiles, dark
+    pixels (0) are left as grass. The block for pixel (row, col) covers map tiles
+    (origin_x + col*scale .. +scale-1, origin_y + row*scale .. +scale-1), so the image reads
+    the right way up: row 0 at the top (smallest y), col 0 at the left.
+
+    Only genuine clear tiles are converted (sav.rail already skips water, houses, etc.), and
+    tiles off the map are skipped, so this is safe on any base save. Returns the number of rail
+    tiles actually stamped (lit-pixel count times scale^2, minus any tiles that fell off the
+    map or were not clear).
+    """
+    import numpy as np
+
+    frame = np.asarray(frame)
+    if frame.ndim != 2:
+        raise ValueError(f"frame must be 2D (rows, cols), got shape {frame.shape}")
+    if scale < 1:
+        raise ValueError(f"scale must be >= 1, got {scale}")
+    if sav.size_x == 0:
+        raise ValueError("map size unknown; call set_size_x()")
+
+    height, width = frame.shape
+    stamped = 0
+    for row in range(height):
+        for col in range(width):
+            if not frame[row, col]:
+                continue
+            bx = origin_x + col * scale
+            by = origin_y + row * scale
+            for dy in range(scale):
+                for dx in range(scale):
+                    if sav.rail(bx + dx, by + dy, TRACK_BIT_CROSS, owner):
+                        stamped += 1
+    return stamped
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("design", help="scenario JSON, or a netlist JSON to place+route first")
+    ap.add_argument("design", nargs="?",
+                    help="scenario JSON, or a netlist JSON to place+route first "
+                         "(omit when using --frame)")
     ap.add_argument("--base", required=True, help="uncompressed OTTN base save")
     ap.add_argument("--out", required=True, help="output .sav path")
     ap.add_argument("--offset", type=int, default=8, help="shift design away from map edge")
@@ -241,7 +283,33 @@ def main() -> int:
                     help="level the map and remove water for a plain canvas")
     ap.add_argument("--directional", action="store_true",
                     help="single-axis track along straight runs (cleaner close up)")
+    # framebuffer-to-tiles mode: stamp a CHIP-8 frame as a block-pixel image.
+    ap.add_argument("--frame",
+                    help="stamp a framebuffer instead of a design. Either a .npy of a 0/1 "
+                         "array, or 'raycaster[:HEADING]' / 'rom:PATH:CYCLES' to run a ROM")
+    ap.add_argument("--scale", type=int, default=8,
+                    help="tiles per pixel edge for --frame (lit pixel -> scale x scale block)")
     a = ap.parse_args()
+
+    sav = Sav(a.base)
+    if a.size:
+        sav.set_size_x(a.size)
+    if a.flatten:
+        conv = sav.flatten()
+        print(f"flattened canvas: {conv} water tiles converted to grass")
+
+    if a.frame:
+        frame = _load_frame(a.frame)
+        lit = int((frame != 0).sum())
+        stamped = stamp_framebuffer(sav, frame, a.offset, a.offset, scale=a.scale)
+        sav.save(a.out)
+        h, w = frame.shape
+        print(f"stamped frame {w}x{h} ({lit} lit pixels) at scale {a.scale} into {a.out}: "
+              f"{stamped} rail tiles (map width {sav.size_x})")
+        return 0
+
+    if not a.design:
+        ap.error("a design JSON is required unless --frame is given")
 
     from scenario import Scenario
     import json
@@ -266,17 +334,39 @@ def main() -> int:
         for r in sc.routes:
             r.path = [(x + a.offset, y + a.offset) for (x, y) in r.path]
 
-    sav = Sav(a.base)
-    if a.size:
-        sav.set_size_x(a.size)
-    if a.flatten:
-        conv = sav.flatten()
-        print(f"flattened canvas: {conv} water tiles converted to grass")
     stamped, skipped = stamp_scenario(sav, sc, directional=a.directional)
     sav.save(a.out)
     note = f", {skipped} skipped (non-clear tiles, e.g. water)" if skipped else ""
     print(f"stamped {stamped} rail tiles into {a.out} (map width {sav.size_x}){note}")
     return 0
+
+
+def _load_frame(spec: str):
+    """Resolve a --frame spec into a 0/1 numpy array.
+
+    Accepted forms:
+      PATH.npy            a saved 0/1 frame array
+      raycaster           the raycaster ROM, default heading 3
+      raycaster:HEADING   the raycaster ROM at the given heading
+      rom:PATH:CYCLES     run any .ch8 for CYCLES instructions
+    """
+    import numpy as np
+
+    if spec.endswith(".npy"):
+        return np.load(spec)
+
+    # frame_export lives in golden/, which conftest/the CLI path setup puts on sys.path.
+    sys.path.insert(0, os.path.join(REPO, "golden"))
+    import frame_export
+
+    if spec == "raycaster" or spec.startswith("raycaster:"):
+        heading = int(spec.split(":", 1)[1]) if ":" in spec else 3
+        return frame_export.get_raycaster_frame(heading)
+    if spec.startswith("rom:"):
+        _, path, cycles = spec.split(":", 2)
+        return frame_export.get_rom_frame(path, int(cycles))
+    raise ValueError(f"unrecognised --frame spec {spec!r} "
+                     "(use PATH.npy, raycaster[:H], or rom:PATH:CYCLES)")
 
 
 if __name__ == "__main__":
