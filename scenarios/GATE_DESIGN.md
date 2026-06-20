@@ -110,6 +110,107 @@ needed NPF) that differs across OpenTTD versions. Turning a screenshot into exac
 the open problem. We do not fake those coordinates. See the TODO(human) markers
 in scenarios/openttdoom_gs/main.nut and STUCK.md.
 
+## SOLVED AND VERIFIED IN GAME: a one input NOR (a NOT) tile
+
+Status update. A single computing gate was built in OpenTTD 15.3 and PROVEN to
+compute by poking its input and watching its output flip. This is the first piece
+of real, in-game logic for the project. It is a NOT (a one input NOR), realised
+with the simplest, most version independent primitive: a block signal reading
+block occupancy. No presignals, no pathfinder dependent routing.
+
+The working GameScript is scenarios/norgate_gs/ (main.nut, info.nut). It runs on
+a dedicated server (openttd.exe -D), borrows the company that the console command
+start_ai founds, and logs everything via GSLog so it is observed on the admin port
+(python tools/ottd_admin.py watch).
+
+### The exact geometry (read back from the proven savegame)
+
+The gate is a single straight rail lane. Reading the proven save tile by tile
+(row y = 42, x increasing east):
+
+      x:   39  40 .. 45  46    47 48 49   50    51  52
+           D   = ===== =  S    =  =  =    S     =   D
+         west          reader  input block   term  east
+         depot         signal  (read here)   sig   depot
+
+  - West reader depot at (39, 42), front (40, 42). Reader train starts here.
+  - Straight NE_SW (x axis) track (39..51).
+  - Reader signal at (46, 42), a normal block signal. The east depot at (52, 42),
+    front (51, 42).
+  - Terminating signal at (50, 42), also a normal block signal. It closes the
+    input block so it is a proper through block, see the dead end note below.
+  - Input feeder depot at (48, 41), front (48, 42), with a connecting corner so
+    an input train can roll onto the input block and park.
+
+The input bit is a train present (1) or absent (0) on the input block (the tiles
+between the reader signal and the terminating signal, here x = 47..49, train
+parked at x = 48 and manually stopped so it sits still).
+
+### The two facts that took the longest to nail (both verified, not guessed)
+
+1. Signal facing. GSRail.BuildSignal(tile, front) builds a signal that PERMITS
+   travel FROM front INTO tile, so the green direction is front -> tile. To let an
+   EASTBOUND reader pass a signal at SIGX you must pass front = SIGX - 1 (the tile
+   WEST of the signal, the one the train comes from). Passing front = SIGX + 1
+   makes a westbound permissive signal whose red back blocks the eastbound reader
+   unconditionally, which looks exactly like a broken gate. This is the single
+   most important coordinate level fact and it is the opposite of the naive guess.
+
+2. No dead end blocks. A normal block signal in front of a block that dead ends
+   (for example straight into a depot) shows red and the train will not enter,
+   even when the block is empty. The fix is to terminate the protected block with
+   a SECOND signal (here at x = 50), so the reader signal at x = 46 guards a real
+   through block (x 47..49) rather than a dead end. With the terminating signal in
+   place the reader signal correctly reads the input block occupancy.
+
+Two more environment facts that block a naive attempt:
+
+  - The build area must be flat and water free. A random map drops lakes onto the
+    fixed build coordinates, and rail will not build on water, which silently
+    truncates the gate. The GS demolishes and LevelTiles its build rectangle first
+    (GSTile.DemolishTile + GSTile.LevelTiles). Alternatively, build on a flattened
+    canvas save (tools/sav_writer.py flatten()).
+  - Observing the output. The GS API exposes NO signal aspect read (no green/red
+    query) and GSTile cannot detect a vehicle on a tile. The output is observed
+    indirectly and reliably: the reader train is ROUTED by the signal, and we read
+    WHERE it ends up with GSVehicle.GetLocation. Reader past the signal (reached
+    the east depot) == output 1, reader held at the signal == output 0.
+
+### The proven truth table (verbatim GSLog, observed on the admin console)
+
+    ==== norprobe NOT-gate truth table (one physical gate, poked) ====
+       A=0 -> NOT=1   (reader reached x51, east depot x52)
+       A=1 -> NOT=0   (reader held at x45, signal x46)
+       RESULT: PASS - the SAME gate flipped output when the input was poked.
+
+The SAME physical structure was poked twice: with no input train the reader sails
+through to the east depot (NOT(0) = 1), then an input train was parked in the input
+block and a fresh reader was held at the signal (NOT(1) = 0). Both rows correct.
+The proven save is OpenTTD save norgate_proven.sav.
+
+### What this de-risks and what is still open
+
+De-risked: a single OpenTTD gate genuinely computes, the build mechanism works
+headlessly, and a GameScript can both BUILD the gate and OBSERVE it compute. The
+signal facing rule and the dead end rule are now known exactly.
+
+Still open for the full machine (NOT yet solved here):
+  - NOR with two or more inputs. The same idea extends: the reader signal's
+    protected block must contain ALL the input taps, so the signal is red iff ANY
+    input train is present, which is exactly NOR (green, reader passes, only when
+    every input is absent). This needs the multiple input taps merged into one
+    block and was not built/verified in this run.
+  - The clock. The verified gate is combinational (run a reader on demand). The
+    synchronous design needs a clock train that releases reader sampling on a
+    shared edge so a chain settles predictably. Not built here.
+  - Composition. Feeding one gate's output (a parked output train) into the next
+    gate's input block, and the one edge register latency, is not yet built.
+  - The presence-encoding readout into the framebuffer signals.
+
+So the deepest unknown, does a gate compute at all in 15.3 and can a script see it,
+is now answered YES. The remaining work is multi input NOR, the clock, and chaining,
+which now have a concrete, verified foundation to build on.
+
 ## Tile footprint and timing, current estimate
 
 These are planning estimates from the reference material, not measurements.

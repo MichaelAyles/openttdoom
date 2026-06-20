@@ -53,7 +53,7 @@ Total test count: 80 passing (`python -m pytest -q`).
   Timendus 5-quirks ROM that would show it is not vendored). vf_reset is covered by the unit
   tests `test_8xy1_or_vf_reset` and `test_8xy2_and_vf_reset_off` instead.
 
-### M2, one working gate. PARTIAL. The design is researched and the build mechanism is chosen. The physical gate geometry is the isolated blocker.
+### M2, one working gate. DONE for NOT and 2-input NOR, verified in game. The clock, chaining and multi-gate composition remain.
 
 - `scenarios/GATE_DESIGN.md` is the design and research note: how a clocked NOR is meant to
   be realised from track, signals (block, two-way, entry/exit/combo presignals) and a clock
@@ -82,6 +82,32 @@ Total test count: 80 passing (`python -m pytest -q`).
      canvas of any size. Screenshots of the 1-bit, 2-bit and 4-bit adders are in `out_screens/`.
   What remains blocked is only the exact tile-by-tile NOR geometry that makes a stamped cell
   COMPUTE (the layouts above are visible structure, not working logic). See STUCK.md #1.
+- NOW SOLVED AND VERIFIED IN GAME: a single computing gate. `scenarios/norgate_gs/` builds a
+  NOT (one-input NOR) and a 2-input NOR from OpenTTD track + a block signal and PROVES they
+  compute by poking the inputs and watching the output flip, observed from the GameScript via
+  `GSVehicle.GetLocation`. Verified 2-input NOR truth table: 00->1, 01->0, 10->0, 11->0 (all
+  four combinations on one structure); NOT: A=0->1, A=1->0 (the same physical gate poked twice).
+  The bit is train-presence on a block; a block signal is red iff its block is occupied, so a
+  reader train passes the signal iff every input is absent, which is NOR. The output is read by
+  where the reader ends up. Two coordinate-level facts were the crux: `GSRail.BuildSignal(tile,
+  front)` permits travel FROM front INTO tile (so an eastbound reader needs front = SIGX-1, the
+  OPPOSITE of the naive guess), and the protected block must be a through block (a second
+  terminating signal), because a normal signal in front of a dead-end block stays red. The build
+  area is demolished+LevelTiles'd first so a random map's lakes do not truncate the rail. Exact
+  geometry is in `scenarios/GATE_DESIGN.md` (the "SOLVED AND VERIFIED" section) and
+  `scenarios/norgate_gs/readme.txt`.
+- INDEPENDENTLY RE-VERIFIED (orchestrator). The GameScript GSLog relay to the admin port turned
+  out NOT to be reliable here, so the original GSLog evidence could not be reproduced through that
+  channel. The 2-input NOR was therefore re-run from scratch through a different, robust readout:
+  the gate encodes the four raw reader-train x positions into the COMPANY NAME, read back via
+  `rcon companies` (`scenarios/norgate_gs/main_verify_byname.nut`). Fresh run returned
+  `NORFX sig46 51 45 39 39`: reader passed the signal (x=51 > 46) only for inputs 00, and was
+  held (x <= 46) for 01/10/11. Applying NOR(a,b) = (reader passed) to the RAW positions gives
+  1,0,0,0 = NOR, judged by the orchestrator, not by the GameScript. So the gate genuinely
+  computes, confirmed independently of the agent's own logging and pass/fail computation.
+  STILL OPEN: the clock train (this gate is run on demand, not clock-sampled), chaining one
+  gate's output into the next gate's input, the one-edge register latency, and the framebuffer
+  readout. These now build on a working, verified foundation rather than an unknown.
 
 ### M3, toolchain spine. DONE, verified in software.
 

@@ -3,61 +3,89 @@
 Isolated hard problems for the human. Each entry is what is blocked, what was tried, the
 exact failure where there is one, and the concrete next step. Plain tone, no em-dashes.
 
-The short version: everything that can be proven in software is proven (see STATUS.md). The
-real blocker is the physical OpenTTD gate, which the brief flagged as the hardest piece. It
-is genuinely unsolved, not faked. The pipeline around it is complete and waiting for it.
+The short version: everything that can be proven in software is proven (see STATUS.md), and the
+single hardest piece the brief flagged, a logic gate that actually computes inside OpenTTD, is
+now SOLVED and independently verified (a 2-input NOR, truth table 1,0,0,0, confirmed via an
+alternate readout channel). What remains is composing many gates into the clocked machine: the
+clock train, gate-to-gate chaining with one-edge latency, framebuffer readout, and folding the
+gate geometry into the place-and-route emitter. Those are engineering on a working foundation,
+not unknowns.
 
-## 1. The physical OpenTTD NOR gate geometry. THE hard one.
+## 1. The physical OpenTTD NOR gate geometry. SOLVED for a single combinational gate.
 
-Blocked: the exact tile-by-tile track and signal layout of a single clocked NOR tile that
-actually computes in OpenTTD, expressed as the `(x, y, track-piece, signal-type, front-tile)`
-tuples a script can stamp.
+RESOLVED (the single-gate part). A single NOT (one-input NOR) and a single 2-input NOR were
+built in OpenTTD 15.3 and PROVEN to compute by poking the input(s) and watching the output
+flip, all from a GameScript. The 2-input NOR was INDEPENDENTLY re-verified by the orchestrator
+(see below), since the agent's original GSLog evidence could not be reproduced (GSLog does not
+relay reliably to the admin port here). Verified truth tables:
 
-Why it is hard: the logic is understood at the signal level (see `scenarios/GATE_DESIGN.md`:
-two-way signals read a bit without consuming it, entry/combo presignals evaluate a boolean
-over block occupancy, a clock train gives one-edge latency). What is missing is the concrete
-geometry. The reference constructions exist as screenshots and old savegames, not as
-coordinates:
+    NOT:  A=0 -> 1,  A=1 -> 0          (one physical gate poked twice)
+    NOR:  00 -> 1, 01 -> 0, 10 -> 0, 11 -> 0   (all four combos on one structure)
 
-- zem.fi, http://zem.fi/2005-10-21-ttd-logic. The NOR there additionally relied on NPF
-  pathfinder behaviour that differs across OpenTTD versions, so it is not a drop-in for 15.3.
-- openttdcoop wiki Logic, https://wiki.openttdcoop.org/Logic, and the optimised-gate blog
-  posts. The wiki Logic page and the blog posts returned HTTP 500 during this run, so the
-  compact optimised-gate exact tile counts could not be pulled from primary source. The
-  4x4 to 8x8 footprint estimate in GATE_DESIGN.md is a planning estimate, not a measurement.
+Re-verification (relay-independent): the gate encodes the four raw reader-train x positions into
+the COMPANY NAME, read back with `rcon companies` (`scenarios/norgate_gs/main_verify_byname.nut`).
+A fresh run returned `NORFX sig46 51 45 39 39`: the reader passed the signal (x=51 > 46) only for
+inputs 00 and was held (x <= 46) for 01/10/11, so output = (reader passed) = 1,0,0,0 = NOR,
+judged from the raw positions, not from the GameScript's own pass/fail logic.
 
-What was tried: all reachable reference pages were fetched and read for the signal mechanism
-(the OpenTTD signals manual and the junctionary advanced-signalling page filled in for the
-500ing pages). No source gives a coordinate-level layout.
+The working GameScript is `scenarios/norgate_gs/` (main_not_poke.nut, main_nor2.nut). The bit
+is train-presence on a piece of track; a block signal is red iff its block is occupied, so a
+reader train passes the signal iff every input is absent, which is NOR. The output is observed
+by where the reader ends up (`GSVehicle.GetLocation`), because the GS API exposes no signal
+aspect read and GSTile cannot detect a vehicle on a tile.
 
-Where it sits in code: `scenarios/openttdoom_gs/main.nut`, function `StampCell`. It currently
-lays one placeholder straight per pin so routing has something to attach to, and is explicitly
-marked as not computing. Every sub-piece (input tap with two-way read signal, the
-presignal NOR evaluation, the output register track, the clock-release tap) has a `TODO(human)`.
+The two coordinate-level facts that took the longest (both verified, not guessed):
+  - `GSRail.BuildSignal(tile, front)` builds a signal that permits travel FROM `front` INTO
+    `tile`. To let an EASTBOUND reader pass a signal at SIGX you pass front = SIGX-1 (the tile
+    the train comes from), the OPPOSITE of the naive guess. front = SIGX+1 makes a westbound
+    signal whose red back blocks the reader unconditionally and looks like a dead gate.
+  - The signal's protected block must be a through block. A normal block signal in front of a
+    dead-end block (e.g. straight into a depot) stays red even when empty. Terminate the input
+    block with a SECOND signal so the reader signal guards a real block.
+  - Plus: the build area must be flat and water-free (a random map drops lakes on the fixed
+    coordinates and rail will not build on water). The GS demolishes + LevelTiles its rectangle
+    first; `tools/sav_writer.py` flatten() is an alternative.
 
-Concrete next step: build one NOR tile by hand in OpenTTD 15.3, confirm it computes when
-poked, then read its tiles back out (or measure them) into the `StampCell` geometry. Once one
-tile is solved, the rest of the pipeline already knows how to place and wire many of them.
+Exact geometry, the verbatim truth tables, and the run procedure are in
+`scenarios/GATE_DESIGN.md` (the "SOLVED AND VERIFIED" section) and
+`scenarios/norgate_gs/readme.txt`. The gate is reproduced by running scenarios/norgate_gs/ (or the relay-independent
+main_verify_byname.nut) on a fresh dedicated server.
 
-## 2. The GameScript cannot be run or verified in this environment.
+STILL OPEN (the rest of the machine), now resting on a verified foundation:
+  - Multi-input NOR with 3+ inputs (the 2-input case is proven; wider fan-in is the same idea,
+    all taps in one protected block, but was not built/verified here).
+  - The clock train. The verified gate is combinational (a reader is run on demand). The
+    synchronous design needs a clock that releases reader sampling on a shared edge so a chain
+    settles predictably. Not built.
+  - Composition: feeding one gate's output (a parked output train) into the next gate's input
+    block, and the one-edge register latency. Not built.
+  - Wiring the per-net output train-presence into the framebuffer signal tiles for the viewer.
+  - Folding this geometry into `scenarios/openttdoom_gs/main.nut::StampCell` (still a placeholder)
+    so the place-and-route pipeline stamps computing cells, not just visible structure.
 
-Blocked: confirming `scenarios/openttdoom_gs/` loads and builds in OpenTTD.
+Concrete next step: extend the proven `norgate_gs` construction to chain two NOR gates (output
+train of gate 1 parked in the input block of gate 2) and add a clock train, then verify a 2-gate
+chain computes with one edge of latency. The single-gate geometry and the observability trick
+are now known and working.
 
-Why: there is no OpenTTD GameScript runtime here. The bundled headless `openttd.exe` is the
-GUI-subsystem Windows release, which does not pipe stdout back to the shell, so even a GS that
-logs via GSLog cannot be observed from this environment, and there is no way to interactively
-poke inputs and read outputs. `main.nut` is therefore unverified Squirrel: its brackets
-balance and its API names follow the documented GS API, but it has never been loaded by
-OpenTTD.
+## 2. GameScript runtime and observability. MOSTLY RESOLVED, with one caveat.
 
-What was tried: static checks only (bracket balance, API-name cross-reference against the GS
-API docs). One real bug was found and fixed by static reading: an operator-precedence error in
-`PickCompany` (`!GSCompany.ResolveCompanyID(c) == COMPANY_INVALID` parsed wrong).
+The GS runtime IS available and was used extensively. A dedicated server (`openttd.exe -D`)
+opens an admin TCP port (3977); `tools/ottd_admin.py` runs console commands (rcon) and reads
+state back. GameScripts load by name from the OpenTTD `game/` dir (the config `[game_scripts]`
+entry must use the GS GetName with NO spaces, a real gotcha that silently disabled loading). A
+company for the deity GS to build as is created with the rcon command `start_ai`. This rig built
+and ran the openttdoom builder, the direct-save renders, and the verified NOR gate.
 
-Concrete next step: `scenarios/openttdoom_gs/readme.txt` has the install-and-run procedure.
-Copy the directory into an OpenTTD `game/` folder, select it under Settings then Game Script,
-start a game, and watch the console (`reload_game_script`, `debug_level script=4`). Fix the
-Squirrel against real loader errors from there.
+The one caveat: GameScript `GSLog` output does NOT relay reliably to the admin console here (the
+GS runs, builds, and its company money drops, but the GSLog lines do not arrive). So results must
+be read through a different channel: encode them into the company name (read via `rcon companies`,
+see `main_verify_byname.nut`), or into on-map signs / a saved game, or screenshot the result. The
+gate verification used the company-name channel for exactly this reason.
+
+What was fixed by actually running it (not static checks): the no-space GS name, the company
+build-context (start_ai), maxing the loan to afford builds, a valid rail-type selection, and
+building offset from the map edge. See `tools/ottd_render.py` for the full working recipe.
 
 ## 3. GameScript company build-context (deity problem).
 
