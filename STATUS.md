@@ -64,11 +64,17 @@ Total test count: 80 passing (`python -m pytest -q`).
   16 passing tests pinning the NOR and NOT truth tables and the one-edge latency. This proves
   the intended semantics are self consistent. It does NOT prove OpenTTD realises them.
 - `scenarios/openttdoom_gs/` is the GameScript that reads the place-and-route data table and
-  walks cells, routes, clock, IO and framebuffer using the real GS API. It is an honest
-  skeleton: every spot that needs real track and signal coordinates is marked `TODO(human)`,
-  and the stamp helpers lay placeholder straights that do NOT compute. No fabricated geometry.
-- Blocked: the exact tile-by-tile NOR construction, the GameScript actually running, and the
-  deity/company build-context question. See STUCK.md.
+  walks cells, routes and bridges using the real GS API. The stamp helpers lay placeholder
+  track (one straight per pin, track along each route, a bridge at each crossing), which is
+  visible structure but does NOT compute. The computing NOR geometry is still `TODO(human)`.
+- NOW PROVEN: the GameScript actually runs in OpenTTD and builds the placed-and-routed design
+  as real rail and bridges, captured as screenshots (1-bit, 2-bit and 4-bit adders, see
+  `out_screens/`). The construction mechanism and the deity/company build-context are solved:
+  a dedicated server (`-D`) builds headlessly, a company is created with the RCON command
+  `start_ai` that the GS waits for, and the GS maxes its loan to afford the build. The whole
+  headless recipe is automated in `tools/ottd_render.py` (drive via the admin port in
+  `tools/ottd_admin.py`). What remains blocked is only the exact tile-by-tile NOR geometry
+  that makes a stamped cell compute (see STUCK.md #1).
 
 ### M3, toolchain spine. DONE, verified in software.
 

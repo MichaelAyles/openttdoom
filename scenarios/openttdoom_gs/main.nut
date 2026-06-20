@@ -39,8 +39,9 @@ class OpenttdoomMain extends GSController {
  * Coordinate helper. The data table uses OpenTTD tile (x, y); the GS API uses a
  * flat TileIndex. GSMap.GetTileIndex does the conversion.
  */
+OFFSET <- 8;   // shift the whole design away from the map border (edge tiles cannot build)
 function OpenttdoomMain::Tile(x, y) {
-    return GSMap.GetTileIndex(x, y);
+    return GSMap.GetTileIndex(x + OFFSET, y + OFFSET);
 }
 
 /*
@@ -72,10 +73,14 @@ function OpenttdoomMain::Start() {
                + this.data.cells.len() + " cells, "
                + this.data.routes.len() + " routes.");
 
-    this.company = this.PickCompany();
-
-    // All construction runs inside a company-mode scope. When `mode` goes out of
-    // scope at the end of Build(), the previous (deity) context is restored.
+    // Wait for a buildable company (single-player already has one; on a dedicated
+    // server, create one with the console command `start_ai`). Build as it.
+    while (GSCompany.ResolveCompanyID(GSCompany.COMPANY_FIRST) == GSCompany.COMPANY_INVALID) {
+        GSLog.Info("openttdoom: waiting for a company to build as (run start_ai)...");
+        GSController.Sleep(25);
+    }
+    this.company = GSCompany.COMPANY_FIRST;
+    GSLog.Info("openttdoom: building as company " + this.company);
     this.Build();
 
     GSLog.Info("openttdoom builder: build pass complete (see TODO markers).");
@@ -90,11 +95,16 @@ function OpenttdoomMain::Start() {
 
 function OpenttdoomMain::Build() {
     local mode = GSCompanyMode(this.company);   // build as this company
+    // Max out the loan so the whole design can be afforded (we screenshot immediately,
+    // so interest does not matter).
+    GSCompany.SetLoanAmount(GSCompany.GetMaxLoanAmount());
+    GSLog.Info("openttdoom: bank balance " + GSCompany.GetBankBalance(this.company));
 
-    // Pick the rail type to build with. TODO(human): confirm a buildable rail
-    // type exists in the scenario's NewGRF set; default rail is usually index 0.
-    GSRail.SetCurrentRailType(GSRail.GetRailType(this.Tile(this.data.clock.x,
-                                                           this.data.clock.y)));
+    // Pick the first available rail type to build with.
+    local rtypes = GSRailTypeList();
+    if (rtypes.Count() == 0) { GSLog.Error("openttdoom: no rail type available to build with"); return; }
+    GSRail.SetCurrentRailType(rtypes.Begin());
+    GSLog.Info("openttdoom: building with rail type " + rtypes.Begin());
 
     foreach (cell in this.data.cells) {
         this.StampCell(cell);

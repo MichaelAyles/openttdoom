@@ -10,7 +10,7 @@
 
 class OpenttdoomGS extends GSInfo {
     function GetAuthor()        { return "openttdoom"; }
-    function GetName()          { return "openttdoom builder"; }
+    function GetName()          { return "openttdoombuilder"; }
     function GetShortName()     { return "OTDM"; }   // 4 chars, must be unique
     function GetDescription() {
         return "Stamps an openttdoom logic design (NOR tiles, routed track, "
@@ -22,7 +22,6 @@ class OpenttdoomGS extends GSInfo {
     function MinVersionToLoad() { return 1; }
     function CreateInstance()   { return "OpenttdoomMain"; }
     function GetCategory()      { return "Scenario"; }
-    function GetURL()           { return ""; }
 }
 
 RegisterGS(OpenttdoomGS());
