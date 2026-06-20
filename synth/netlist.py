@@ -377,8 +377,15 @@ class NetlistBuilder:
 
 
 def equivalent(a: Netlist, b: Netlist) -> bool:
-    """True iff two netlists have identical primary I/O and the same truth table."""
-    if a.ports.inputs != b.ports.inputs or a.ports.outputs != b.ports.outputs:
+    """True iff two netlists have the same primary I/O names and the same truth table.
+
+    Port comparison is order-independent (by name), since the truth table is keyed by
+    name: two netlists that compute the same function are equivalent even if a synthesis
+    backend emitted the input ports in a different order.
+    """
+    if set(a.ports.inputs) != set(b.ports.inputs):
+        return False
+    if set(a.ports.outputs) != set(b.ports.outputs):
         return False
     for iv, ov in a.truth_table():
         if b.outputs_for(iv) != ov:
