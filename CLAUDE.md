@@ -4,76 +4,79 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-openttdoom: a Wolfenstein-3D-style raycaster running on a small computer built entirely
-out of OpenTTD trains and signals, with the framebuffer rendered as on-map signals. This
-is a long-horizon research project. The repo currently contains only `prompt.md`, the
-authoritative build brief. Read `prompt.md` in full before doing anything — it defines the
-architecture (already decided, do not re-derive), the milestones, and the scope guardrails.
+openttdoom: a Wolfenstein-3D style raycaster running on a small computer built entirely out
+of OpenTTD trains and signals, with the framebuffer drawn as on-map signals. This is a
+long-horizon research project. `prompt.md` is the authoritative build brief, read it in full.
+`STATUS.md` is the current state (what works, what is stubbed), and `STUCK.md` is the isolated
+hard problems. Read those three before starting anything.
 
-## How the system fits together
-
-The pipeline runs left to right, each stage provable on its own:
-
-1. **Golden model** (`golden/`) — a Python CHIP-8 / XO-CHIP interpreter plus framebuffer
-   viewer. Proves the workload (a raycaster ROM) renders with zero OpenTTD involvement.
-   CHIP-8's 64x32 monochrome display maps 1:1 onto the signal framebuffer.
-2. **HDL** (`hdl/`) — Amaranth (Python) describes the machine and a primitive cell library.
-3. **Synthesis** (`synth/`) — yosys lowers the HDL to a netlist of primitive cells.
-4. **Place and route** (`place_and_route/`) — positions cells and routes signal nets as
-   track, emitting a loadable OpenTTD scenario (`scenarios/`).
-5. **Substrate** — OpenTTD itself. Bits are signal states, train presence is the value,
-   gates are track, a train on a fixed loop is the clock. Gate geometry comes from the
-   openttdcoop wiki (`wiki.openttdcoop.org/Logic`) and zem.fi's logic page — use those
-   constructions, do not invent gate geometry from scratch.
-
-The CHIP-8 target was chosen so existing assemblers/emulators/demos let us prove "the
-workload runs on the machine" independently of OpenTTD. Heavy math (sin/cos/reciprocal)
-lives in lookup tables that become hardwired ROM (free landscape) on the substrate.
-
-## Construction mechanism (M2 decision)
-
-Scenarios are built by a **GameScript** (Squirrel API) that constructs track/signals/trains
-when the scenario loads — try this before hand-writing the binary `.sav` chunked format.
-The GameScript path is the more tractable one and is the construction mechanism reused by
-the place-and-route emitter in M3/M4.
-
-## Milestones (do in order, checkpoint after each)
-
-M0 scaffold + deps → M1 workload renders in golden model → M2 one working gate (NOR/NOT
-tile stamp that computes in headless OpenTTD) → M3 toolchain spine (Amaranth→yosys→P&R→
-scenario) → M4 4-bit ripple-carry adder end to end. **Stop at the M4 review gate** and write
-`STATUS.md`. M2 (the gate tile) is the hardest foundational piece.
-
-## Working rules (from the brief — these override default behavior)
-
-- **Never fake an implementation.** If something doesn't work, leave a clear `TODO(human):`
-  and an entry in `STUCK.md` (what you tried, what failed, the exact error). A clear stub
-  beats plausible non-working code.
-- **Verify every claim.** Run it, show the output. If OpenTTD builds, show it starting. If a
-  gate computes, show the input poke and the output flip.
-- **Do not thrash.** Make one real attempt at a stuck hard piece; if still blocked, document
-  it precisely in `STUCK.md` and move on to scaffolding. Do not burn the run on one piece.
-- **Small, single-concern commits.**
-- **Docs: markdown, no em-dashes, plain dev-log tone.** Use commas and full stops.
-- Respect **Out of scope** (see `prompt.md`): full CHIP-8 datapath in HDL, running the
-  raycaster on the train machine, the OpenTTD speed fork, dithering/color, trains-as-pixels,
-  real DOOM frames. Stub and roadmap these in `README.md`, do not attempt them.
+No em-dashes in docs or comments, the owner's style is commas and full stops. Never fake an
+implementation: if something cannot be verified, leave a `TODO(human):` and an entry in
+STUCK.md, do not write plausible non-working code. Verify claims by running them.
 
 ## Commands
 
-None exist yet. Per the brief, build these under `scripts/` and keep them reproducible:
+The dev environment is Windows with Git-Bash / MINGW. Python is `python` (3.12).
 
-- `scripts/setup.sh` — pull and build all dependencies (OpenTTD via CMake + OpenGFX/OpenSFX/
-  OpenMSX base sets, DOOM source + shareware DOOM1.WAD for reference only, c-octo CHIP-8
-  toolchain, `pip install amaranth`, yosys + verilator via oss-cad-suite, pygame/pillow/numpy).
-- `scripts/build.sh` — build the project artifacts.
-- `scripts/run_headless.sh` — run headless OpenTTD (`openttd -D`); must start with OpenGFX
-  and load a test map.
+- `bash scripts/setup.sh` reproduces the environment: pulls the prebuilt OpenTTD 15.3 win64
+  binary and OpenGFX 8.0 into `vendor/`, pip-installs the Python toolchain.
+- `bash scripts/run_headless.sh [TICKS]` runs headless OpenTTD (`-vnull:ticks=...`), the M0
+  smoke test. The Windows binary is GUI-subsystem so stdout is not piped: success is exit 0
+  and wall-clock scaling with the tick count.
+- `bash scripts/build.sh` runs the whole toolchain: synth, then place-and-route plus emitter
+  on the 4-bit adder, then the test suites.
+- `python -m pytest -q` runs all tests (75 currently). Run a single module's tests with
+  `python -m pytest place_and_route/test_pnr.py -q`. A repo-root `conftest.py` puts `synth`,
+  `place_and_route`, `hdl`, `golden`, `scenarios` on `sys.path`, so tests import contract
+  modules by bare name (`from netlist import ...`, `from scenario import ...`).
 
-Note: the dev environment is Windows (PowerShell primary). The brief's scripts are `.sh`;
-a Bash tool is available, but confirm shell assumptions when authoring them.
+## Architecture
 
-## Dependencies live in vendor/
+One compiler from a circuit description down to an OpenTTD map, with a software reference
+model alongside to stay honest:
 
-`vendor/openttd/`, `vendor/doom/`, `vendor/chip8/` — pulled deps, gitignored where large.
-Fetch only the freely-distributable shareware DOOM1.WAD, never commercial WADs.
+```
+  golden model (Python CHIP-8 + viewer)     proves the workload renders, no OpenTTD
+        |
+  HDL  ->  netlist  ->  place & route  ->  scenario  ->  OpenTTD substrate
+ (hdl/)   (synth/)    (place_and_route/)  (scenarios/)   (trains + signals)
+```
+
+The two load-bearing contracts every stage is built against (do not casually break them):
+
+- `synth/netlist.py`: the gate-level `Netlist`. A tiny cell library where NOR is the only
+  physically buildable gate (universal, NOT is a one-input NOR). It carries the software
+  "golden hardware" simulator (`simulate`, `truth_table`), `to_nor()` lowering to the
+  buildable set `{NOR, CONST0, CONST1}`, `equivalent()` (port-order independent), and JSON IO.
+- `place_and_route/scenario.py`: the spatial `Scenario` (placed cells, routed nets, IO pads,
+  framebuffer) with JSON IO and `to_nut()`, which emits the Squirrel data table the GameScript
+  reads on load.
+
+Stage notes:
+
+- `golden/` is the M1 oracle: a complete CHIP-8 interpreter (`chip8.py`) plus a headless PNG
+  viewer (`viewer.py`), checked against the Timendus reference ROMs by exact framebuffer hash.
+- `hdl/` is the Amaranth frontend (behavioural `Adder4` plus a structural `build_adder4_netlist`).
+- `synth/` lowers to a buildable NOR netlist. The verified path is the Python `to_nor()`, not
+  yosys. yosys is optional: only a stripped WASM yosys is reachable here, the full
+  verilog-to-NOR techmap is parked in `synth/adder4.ys` as `TODO(human)`.
+- `place_and_route/` places, routes (a crude maze router, unrouted nets recorded honestly),
+  emits the scenario, and checks it (`check.py`: DRC, `scenario_to_netlist` reconstruction,
+  `verify_equivalence`).
+- `scenarios/openttdoom_gs/` is the OpenTTD GameScript. This is the M2 hard piece: the build
+  mechanism (Squirrel over binary savegame) is chosen and the data walk is real, but the
+  actual NOR gate tile geometry is unsolved and marked `TODO(human)`. See `GATE_DESIGN.md`.
+
+## Where the project stands
+
+M0 and M1 are done and verified. M3 (the toolchain) is verified in software. M4 (the 4-bit
+adder) closes through the whole pipeline in software (synth to scenario, logic preserved at
+every step). The one thing that does not close is the physical OpenTTD gate: the exact track
+and signal geometry of a computing NOR tile is the open research problem. That, the
+GameScript runtime verification, the deity/company build-context, and the channel router are
+the four things handed to the human. Details and file pointers are in STATUS.md and STUCK.md.
+
+## Out of scope this run (roadmap only, see README.md)
+
+Full CHIP-8 datapath in HDL, running the raycaster on the train machine, the OpenTTD speed
+fork, dithering/grayscale/palette colour, trains-as-pixels, rendering real DOOM frames.
