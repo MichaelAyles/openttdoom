@@ -141,6 +141,23 @@ framebuffers.
 
 *The CHIP-8 IBM-logo test render, one of the exact-hash golden checks.*
 
+## A frame rendered on the OpenTTD map
+
+The framebuffer is meant to live on the map as pixels, so the loop is closed: a ROM runs in
+the golden interpreter, produces a 64x32 one-bit frame, and `tools/sav_writer.py`
+(`stamp_framebuffer`) writes each lit pixel as a block of rail tiles straight into an OpenTTD
+save. Loaded in game and screenshotted, the frame appears directly on the map (lit pixels are
+orange rail, dark pixels are green grass). This is the P0 signals-as-pixels display, end to
+end, golden model to OpenTTD screenshot.
+
+![The CHIP-8 IBM logo rendered as tiles on the OpenTTD map](out_screens/frame_ibm.png)
+
+*The IBM-logo framebuffer rendered as on-map rail tiles in OpenTTD.*
+
+![A raycaster frame rendered as tiles on the OpenTTD map](out_screens/frame_raycaster.png)
+
+*A raycaster frame, the DOOM-style pseudo-3D view, rendered on the OpenTTD map.*
+
 ## Build and run
 
 Everything targets Git-Bash / MINGW on Windows, the environment this repo was built and
