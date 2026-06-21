@@ -17,6 +17,62 @@ adder and an 8-bit CHIP-8 ALU both close through it end to end.
 *The 4-bit ripple-carry adder, placed and routed by the toolchain and stamped into a real
 OpenTTD map.*
 
+## Where we are
+
+"A DOOM frame rendered in OpenTTD" has two readings. The easy one, a DOOM-style frame shown
+as pixels on the map, is **done**: we run a raycaster ROM, get a 64x32 frame, and stamp it onto
+the map as tiles (see the frame images below). The real goal is the hard one, a DOOM frame
+**computed by the train-built machine** and lit up on its own signal display. Progress toward
+that:
+
+```
+Machine-computed DOOM frame:  [######------------------------]  ~20%
+```
+
+That number is deliberately honest: every research UNKNOWN is now retired (a gate computes,
+gates compose, there is a clock, the toolchain compiles a circuit to a map, the workload
+renders, and the box can even build OpenTTD from source), but the remaining ~80% is
+construction at scale (the full CPU, built as thousands of computing gates, run fast enough to
+finish a frame), which is large but no longer a mystery.
+
+### Milestones achieved (all verified, most in game)
+
+- **The toolchain compiles a circuit to an OpenTTD map**, verified end to end in software: a
+  4-bit adder and an 8-bit CHIP-8 ALU both go HDL to netlist to NOR to place-and-route to
+  scenario with the logic preserved at every step. Routing reaches 100 percent via perpendicular
+  bridges, and a real yosys techmap is wired in (adder 92 to 62 NOR cells, ALU 891 to 442).
+- **The workload renders**: a complete CHIP-8 interpreter passes the Timendus reference ROMs by
+  exact hash, and a from-scratch raycaster ROM draws a pseudo-3D maze.
+- **A frame is rendered as on-map pixels**: the IBM logo and a raycaster frame stamped straight
+  into a savegame as rail tiles (the direct save writer does the 4-bit adder, ~40k tiles, in
+  ~0.3s).
+- **A logic gate computes in OpenTTD**: a 2-input NOR, truth table 1,0,0,0, independently
+  re-verified.
+- **Gates compose**: a 2-gate chain computing OR = NOT(NOR), 0,1,1,1, triple-verified.
+- **A clock train and live re-evaluation** of a gate on the same tiles, verified.
+- **A reliable clock-synchronised NOT gate**: output NOT(0,1,1,0,1,0) = 1,0,0,1,0,1, reproduced
+  8 of 8 independent fresh runs.
+- **OpenTTD builds from source on this box** (MSVC 2022 + vcpkg + CMake), so the speed fork is no
+  longer environment-blocked.
+
+### Key blockers to a machine-computed DOOM frame
+
+1. **No self-contained clock yet.** The clocked gate works but the per-edge release is
+   GameScript-mediated. A pure track-signal interlock failed on an OpenTTD reservation-coupling
+   (reading the clock block's occupancy stalls the clock), and there is no physical output
+   register. A real machine needs a self-sustaining clock and a one-edge latch.
+2. **The emitter stamps placeholder track, not computing cells.** The verified NOR-gate geometry
+   exists, but `place_and_route` to GameScript (`StampCell`) still lays illustrative track. Until
+   the real geometry is folded in, the pipeline draws the CPU's floor plan, it does not build a
+   working one.
+3. **The machine does not exist yet.** Only a 4-bit adder and an 8-bit ALU exist as netlists. A
+   CHIP-8 CPU also needs a register file, instruction decoder, memory, and a display driver, none
+   of which are built, then all of it assembled as thousands of computing gates on the map.
+4. **Speed.** Even fully built, computing one CHIP-8 frame at stock OpenTTD speed is impractically
+   slow (a 4-bit adder's carry took about two in-game months in the classic constructions). The
+   OpenTTD speed fork (stripped tick loop, uncapped sim) is what makes a frame watchable. The
+   compiler to build it is now present, but the fork itself is not written.
+
 ## The in-game breakthroughs
 
 These are verified in OpenTTD 15.3, built and observed entirely from a GameScript driven
