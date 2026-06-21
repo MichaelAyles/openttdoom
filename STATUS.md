@@ -228,10 +228,21 @@ Total test count: 80 passing (`python -m pytest -q`).
   read was WRONG: the flakiness is a GENUINE per-case train-dispatch fragility (an input train not
   parking, a reader not launching), not the parallel speed fork. The MECHANISM is correct, every clean
   run gives exactly 0,1,1,1, but the per-case choreography (build, park each input, launch each reader,
-  across 4 cases x 2 gates) is only ~3/5 reliable. Hardening that dispatch to >=4/5 is the open item and
-  is on the critical path (an emitted adder is ~10-20 cells, so per-cell choreography must be reliable
-  before larger circuits can compute). Run with `tools/run_or.py`; see scenarios/computecell_gs/
-  (RunCopyOR/BuildAndLaunch) and readme.txt Stage 2.
+  across 4 cases x 2 gates) was only ~3/5 reliable. A dispatch-hardening pass (confirm-then-proceed
+  polling instead of fixed Sleeps; ParkInputConfirmed rebuild-until-on-tap; BuildAndLaunch egress
+  confirmation; yielding inside Prepare's ~1000-tile demolish so the command queue stops starving
+  launches) raised it but did NOT make it solid: across three independent 5-run samples of the hardened
+  gate the harden agent got 5/5, an independent verifier 4/5, and the orchestrator 3/5, so ~12/15 = 80%.
+  The residual failures are the SAME two races (an input train not catching on its tap, a reader not
+  leaving its depot). ROOT CAUSE, now understood: the input bit is set by catching a MOVING train on a
+  junction tap tile (a through-tile the train will not stop on by itself) and the reader is launched
+  from a depot, both inherently racy, so retry-tuning only softens them. At ~80% per 2-gate circuit this
+  does NOT scale (an emitted adder is ~10-20 cells, 0.8^N collapses). The real fix is DETERMINISTIC
+  placement by construction: an input train that RESTS on its tap by a holding signal/stub rather than
+  being caught mid-motion, and a reader that is gated to leave deterministically. That mechanism-level
+  fix, not more retry-tuning, is the open item and the enabler for SC3 (the emitted adder). Run with
+  `tools/run_or.py`; see scenarios/computecell_gs/ (RunCopyOR/ParkInputConfirmed/BuildAndLaunch) and
+  readme.txt Stage 2.
 
 ### M3, toolchain spine. DONE, verified in software.
 

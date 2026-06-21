@@ -52,27 +52,68 @@ function ComputeCellMain::PickEngine(rt) {
 // backlog is draining on a fresh/contended server. So we nudge it out over a long window and
 // re-append the order if it ever got lost. Returns the (valid) vehicle handle, or null.
 function ComputeCellMain::BuildAndLaunch(depot, dest) {
+    local depx = GSMap.GetTileX(depot), depy = GSMap.GetTileY(depot);
+    // Build ONE train, retrying only the (rare) transient invalid handle. We deliberately keep
+    // command volume low: a storm of BuildVehicle/SellVehicle retries trips the GS command-rate
+    // limit and throttles the whole script, which itself looks like a stall. So the primary
+    // strategy is to be PATIENT with a single train, nudging it out over a long window, and only
+    // sell+rebuild ONCE as a genuine last resort.
     local v = null;
-    for (local b = 0; b < 8; b++) {
+    for (local b = 0; b < 5; b++) {
         v = GSVehicle.BuildVehicle(depot, this.eng);
         if (GSVehicle.IsValidVehicle(v)) break;
-        GSController.Sleep(8);
+        GSController.Sleep(10);
     }
     if (!GSVehicle.IsValidVehicle(v)) return null;
     GSOrder.AppendOrder(v, dest, GSOrder.OF_NON_STOP_INTERMEDIATE);
     GSController.Sleep(6);
-    // Persistently nudge the train out of the depot. Re-issue Start each iteration until the
-    // train is on open track (not in a depot). Re-append the order if the count dropped to 0.
-    for (local r = 0; r < 30; r++) {
+
+    // Helper-free inline nudge loop: re-issue Start only while genuinely stopped in the depot
+    // (re-appending a lost order), and CONFIRM the train has advanced off the depot tile (its
+    // location is no longer the depot tile). Returns true once it has launched onto the lane.
+    local launched = false;
+    for (local r = 0; r < 50; r++) {
+        if (!GSVehicle.IsValidVehicle(v)) break;
         if (GSVehicle.IsStoppedInDepot(v)) {
-            if (GSOrder.GetOrderCount(v) == 0) GSOrder.AppendOrder(v, dest, GSOrder.OF_NON_STOP_INTERMEDIATE);
+            if (GSOrder.GetOrderCount(v) == 0)
+                GSOrder.AppendOrder(v, dest, GSOrder.OF_NON_STOP_INTERMEDIATE);
             GSVehicle.StartStopVehicle(v);
+            GSController.Sleep(7);   // give the start command time to take before re-toggling
         } else {
-            break;
+            local loc = GSVehicle.GetLocation(v);
+            if (GSMap.GetTileX(loc) != depx || GSMap.GetTileY(loc) != depy) { launched = true; break; }
+            GSController.Sleep(5);
         }
-        GSController.Sleep(5);
     }
-    return v;
+    if (launched) return v;
+
+    // Genuine last resort: the train never left the depot in the whole window. Sell it and try
+    // ONE clean rebuild (a single retry keeps command volume bounded).
+    if (GSVehicle.IsValidVehicle(v)) GSVehicle.SellVehicle(v);
+    GSController.Sleep(10);
+    v = null;
+    for (local b = 0; b < 5; b++) {
+        v = GSVehicle.BuildVehicle(depot, this.eng);
+        if (GSVehicle.IsValidVehicle(v)) break;
+        GSController.Sleep(10);
+    }
+    if (!GSVehicle.IsValidVehicle(v)) return null;
+    GSOrder.AppendOrder(v, dest, GSOrder.OF_NON_STOP_INTERMEDIATE);
+    GSController.Sleep(6);
+    for (local r = 0; r < 50; r++) {
+        if (!GSVehicle.IsValidVehicle(v)) break;
+        if (GSVehicle.IsStoppedInDepot(v)) {
+            if (GSOrder.GetOrderCount(v) == 0)
+                GSOrder.AppendOrder(v, dest, GSOrder.OF_NON_STOP_INTERMEDIATE);
+            GSVehicle.StartStopVehicle(v);
+            GSController.Sleep(7);
+        } else {
+            local loc = GSVehicle.GetLocation(v);
+            if (GSMap.GetTileX(loc) != depx || GSMap.GetTileY(loc) != depy) return v;
+            GSController.Sleep(5);
+        }
+    }
+    return v;   // return the (valid) handle even if egress was not confirmed; caller polls position
 }
 function ComputeCellMain::Tx(v) {
     if (v == null || !GSVehicle.IsValidVehicle(v)) return -1;
@@ -85,11 +126,20 @@ function ComputeCellMain::Ty(v) {
 function ComputeCellMain::Say(s) { GSCompany.SetName(s); }
 
 function ComputeCellMain::Prepare(x0, y0, x1, y1) {
+    // Demolishing the whole band-box is hundreds to ~a thousand DoCommands. Issuing them in a
+    // tight loop with no yield floods the GS command queue, and later reader-launch commands then
+    // sit behind that backlog (the observed "reader barely left the depot / -1 launch" failures
+    // happen when the queue is still draining). Yield periodically so the queue stays shallow.
+    local issued = 0;
     for (local x = x0; x <= x1; x++)
-        for (local y = y0; y <= y1; y++)
+        for (local y = y0; y <= y1; y++) {
             GSTile.DemolishTile(GSMap.GetTileIndex(x, y));
+            if ((++issued % 24) == 0) GSController.Sleep(2);
+        }
     GSTile.LevelTiles(GSMap.GetTileIndex(x0, y0), GSMap.GetTileIndex(x1, y1));
+    GSController.Sleep(4);
     GSTile.LevelTiles(GSMap.GetTileIndex(x0, y0), GSMap.GetTileIndex(x1, y1));
+    GSController.Sleep(8);
 }
 
 /*
@@ -168,20 +218,83 @@ function ComputeCellMain::StampGeom(cell, g, eastDepot) {
 }
 
 // Park an input train on tile (tx, Y) from its feeder depot, stopping it dead on the tap.
+// Returns the vehicle handle; the caller verifies it is CONFIRMED on the tap with OnTap().
 function ComputeCellMain::ParkInput(inDepot, tx, Y) {
-    local v = GSVehicle.BuildVehicle(inDepot, this.eng);
+    local v = null;
+    // The build itself can flake (transient invalid handle on a fresh server), so retry it a
+    // few times. Keep command volume modest to avoid tripping the GS command-rate throttle.
+    for (local b = 0; b < 5; b++) {
+        v = GSVehicle.BuildVehicle(inDepot, this.eng);
+        if (GSVehicle.IsValidVehicle(v)) break;
+        GSController.Sleep(10);
+    }
+    if (!GSVehicle.IsValidVehicle(v)) return null;
     GSOrder.AppendOrder(v, GSMap.GetTileIndex(tx, Y), GSOrder.OF_NON_STOP_INTERMEDIATE);
-    if (GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
-    for (local w = 0; w < 40; w++) {
-        GSController.Sleep(5);
-        if (GSVehicle.IsValidVehicle(v)
-            && GSMap.GetTileX(GSVehicle.GetLocation(v)) == tx
-            && GSMap.GetTileY(GSVehicle.GetLocation(v)) == Y) {
+    // Get it moving out of the depot first (re-issue Start while stopped in the depot).
+    for (local w = 0; w < 30; w++) {
+        if (!GSVehicle.IsValidVehicle(v)) return null;
+        if (GSVehicle.IsStoppedInDepot(v)) {
+            if (GSOrder.GetOrderCount(v) == 0)
+                GSOrder.AppendOrder(v, GSMap.GetTileIndex(tx, Y), GSOrder.OF_NON_STOP_INTERMEDIATE);
             GSVehicle.StartStopVehicle(v);
-            break;
+            GSController.Sleep(7);
+        } else {
+            break;   // on the lane now
         }
     }
+    // CATCH the train ON the tap and freeze it dead. The tap tile is a lane junction and the order
+    // is non-stop, so the train will NOT stop there on its own, it sails onto the east-west lane.
+    // We must poll FAST so we do not overshoot the single tap tile: a coarse poll can sample the
+    // train one tile before and one tile after the tap, never catching it, which leaves the input
+    // ABSENT and makes gate1 wrongly pass (the 0,0,1,1 failure). Tight poll = reliable freeze. If
+    // it overshoots east of the tap, we give up on this train (return it off-tap) and the caller
+    // (ParkInputConfirmed) detects not-OnTap and rebuilds a fresh one.
+    for (local w = 0; w < 120; w++) {
+        if (!GSVehicle.IsValidVehicle(v)) return null;
+        local loc = GSVehicle.GetLocation(v);
+        local vx = GSMap.GetTileX(loc), vy = GSMap.GetTileY(loc);
+        if (vx == tx && vy == Y) {
+            GSVehicle.StartStopVehicle(v);   // dead stop on the tap
+            break;
+        }
+        if (vx > tx && vy == Y) break;   // overshot onto the lane: unrecoverable, let caller rebuild
+        GSController.Sleep(2);
+    }
     return v;
+}
+
+// True iff vehicle v is valid and currently sitting on tile (tx, Y).
+function ComputeCellMain::OnTap(v, tx, Y) {
+    if (v == null || !GSVehicle.IsValidVehicle(v)) return false;
+    local loc = GSVehicle.GetLocation(v);
+    return GSMap.GetTileX(loc) == tx && GSMap.GetTileY(loc) == Y;
+}
+
+// Park an input train and CONFIRM it ends up STABLY resting on its exact tap tile, retrying
+// the whole placement (sell + rebuild) up to a few attempts. "Stable" = on the tap across two
+// consecutive polls (so we know it has stopped dead, not just passing through). Returns the
+// parked vehicle, or null if it could never be confirmed (the caller must not read a gate
+// with an unconfirmed input).
+function ComputeCellMain::ParkInputConfirmed(inDepot, tx, Y) {
+    local v = null;
+    for (local attempt = 0; attempt < 3; attempt++) {
+        v = this.ParkInput(inDepot, tx, Y);
+        // poll for the train to be resting on the tap tile across two consecutive checks.
+        local stable = 0;
+        for (local w = 0; w < 24; w++) {
+            if (this.OnTap(v, tx, Y)) {
+                stable++;
+                if (stable >= 2) return v;   // confirmed parked and stationary on the tap
+            } else {
+                stable = 0;
+            }
+            GSController.Sleep(5);
+        }
+        // not confirmed: tear this attempt down and rebuild fresh.
+        if (v != null && GSVehicle.IsValidVehicle(v)) GSVehicle.SellVehicle(v);
+        GSController.Sleep(8);
+    }
+    return null;
 }
 
 // Run a fresh reader west->east on gate g, return its final x (>SIGX means it passed).
@@ -324,14 +437,36 @@ function ComputeCellMain::RunCopyOR(g0cell, g1cell, dy, bits) {
         GSRail.BuildRailTrack(GSMap.GetTileIndex(grest, y), GSRail.RAILTRACK_NW_SE);
     GSRail.BuildRailTrack(GSMap.GetTileIndex(grest, g2Y), GSRail.RAILTRACK_NW_NE);
 
-    // Let the build/terraform command backlog drain before running any reader. On a contended
-    // server (a parallel OpenTTD eating CPU), reader dispatch issued on top of a still-draining
-    // build queue is the all-readers-stuck-in-depot stall; a short settle removes it.
-    GSController.Sleep(15);
+    // Let the build/terraform command backlog drain before running any reader. Reader dispatch
+    // issued on top of a still-draining build queue is the all-readers-stuck-in-depot / barely-
+    // moved stall, so we settle generously here before parking inputs or launching readers.
+    GSController.Sleep(25);
 
-    // Pre-park gate1's primary inputs a,b per the combo.
+    // Pre-park gate1's primary inputs a,b per the combo, and CONFIRM each one is actually
+    // resting on its tap before the reader runs. An input that fails to park would make gate1
+    // wrongly see an empty block and pass (the observed 0,0,1,1 case-01 failure). We hold the
+    // parked handles and do not proceed to read the gate until every required input is confirmed
+    // on its tap; if any slipped while the others parked, we re-park it.
+    local needInputs = [];
     for (local i = 0; i < g1.n; i++)
-        if (bits & (1 << i)) this.ParkInput(g1.inDepots[i], g1.taps[i], g1.Y);
+        if (bits & (1 << i)) needInputs.append(i);
+    local parked = {};
+    foreach (i in needInputs)
+        parked[i] <- this.ParkInputConfirmed(g1.inDepots[i], g1.taps[i], g1.Y);
+    // Final strict gate: every required input must be on its exact tap RIGHT NOW. Re-park any
+    // that drifted, a few times, before launching the reader.
+    for (local pass = 0; pass < 3; pass++) {
+        local allOn = true;
+        foreach (i in needInputs) {
+            if (!this.OnTap(parked[i], g1.taps[i], g1.Y)) {
+                allOn = false;
+                if (parked[i] != null && GSVehicle.IsValidVehicle(parked[i]))
+                    GSVehicle.SellVehicle(parked[i]);
+                parked[i] = this.ParkInputConfirmed(g1.inDepots[i], g1.taps[i], g1.Y);
+            }
+        }
+        if (allOn) break;
+    }
     GSController.Sleep(8);
 
     // Run gate1's reader toward its east depot; it coasts to grest and rests there iff it passes
@@ -339,19 +474,86 @@ function ComputeCellMain::RunCopyOR(g0cell, g1cell, dy, bits) {
     // tap. If held by an input it never reaches grest and gate2's input block stays empty.
     local v1 = this.BuildAndLaunch(g1.wdepot, g1eDepot);
     local g1x = this.Tx(v1);
-    for (local s = 0; s < 30; s++) {
+    local g1Settled = false;
+    local g1Held = false;
+    local lastH = -999, stillH = 0, relaunches = 0;
+    for (local s = 0; s < 48; s++) {
         GSController.Sleep(10);
         local cx = this.Tx(v1);
         if (cx >= 0) g1x = cx;
-        if (cx >= grest && this.Ty(v1) == g1.Y) { GSVehicle.StartStopVehicle(v1); g1x = cx; break; }
+        if (cx >= grest && this.Ty(v1) == g1.Y) {
+            // gate1 passed (NOR=1): freeze it dead on the coupling rest tile so it OCCUPIES
+            // gate2's input block. Confirm it actually stayed put (stationary, on the lane).
+            GSVehicle.StartStopVehicle(v1); g1x = cx;
+            for (local q = 0; q < 6; q++) {
+                GSController.Sleep(6);
+                if (this.Tx(v1) == grest && this.Ty(v1) == g1.Y) g1Settled = true; else g1Settled = false;
+            }
+            break;
+        }
+        // stall vs held: a held NOR=0 reader parks AT the reader signal (cx ~ g1.sigx-1 = 18). A
+        // STALLED reader (a dropped Start on a throttled server) sits BELOW the signal region
+        // (cx < g1.sigx-1), barely past the depot, and never advances (the g1x=13/-1 failures).
+        if (cx == lastH) stillH++; else stillH = 0;
+        lastH = cx;
+        if (cx >= g1.sigx - 1 && cx < grest && stillH >= 3) { g1Held = true; break; }   // genuinely held
+        // STALL RECOVERY: stuck below the signal region (a dropped Start on a throttled server,
+        // the g1x=13/-1 failures). Rebuild the reader cleanly via BuildAndLaunch, which itself
+        // confirms egress. A couple of bounded relaunches turn the occasional launch flake into a
+        // clean pass. (We do NOT hand-toggle a lane-stalled train: a blind StartStop can stop a
+        // moving one. A fresh reader from the west depot is the reliable recovery.)
+        if (cx >= 0 && cx < g1.sigx - 1 && stillH >= 4 && relaunches < 2) {
+            relaunches++;
+            if (GSVehicle.IsValidVehicle(v1)) GSVehicle.SellVehicle(v1);
+            GSController.Sleep(8);
+            v1 = this.BuildAndLaunch(g1.wdepot, g1eDepot);
+            lastH = -999; stillH = 0;
+        }
+    }
+    // If gate1 neither settled at grest nor was confirmed held in the loop, give it one more
+    // short stability window so gate2 does not race a gate1 reader that is still crawling.
+    if (!g1Settled && !g1Held) {
+        local last = this.Tx(v1), stillCount = 0;
+        for (local q = 0; q < 12; q++) {
+            GSController.Sleep(8);
+            local cx = this.Tx(v1);
+            if (cx >= 0) g1x = cx;
+            if (cx == last) stillCount++; else stillCount = 0;
+            last = cx;
+            if (stillCount >= 3 && cx < grest) break;   // held, stable, short of grest
+        }
     }
     GSController.Sleep(8);
 
     // Run gate2's reader; its raw final x is the OR output (x > g2sigx => OR 1). Built and driven
     // inline (not RunReader) since gate2's geometry here is the co-located one, not a Geom table.
-    local v2 = this.BuildAndLaunch(g2wDepot, g2eDepot);
+    // BuildAndLaunch already confirms it left its depot (defeats the launch-stall, the run-4
+    // no-readout failure). We then poll until its x is STABLE so the readout is its true final
+    // position, not a mid-transit sample. A passing reader comes to rest well past g2sigx; a held
+    // reader stops AT g2sigx. Either way the final tile is > g2bx (the first lane tile). If the
+    // reader never gets past the start (a wedged launch), we rebuild it and try again.
     local g2x = g2bx - 1;
-    for (local s = 0; s < 16; s++) { GSController.Sleep(18); local cx = this.Tx(v2); if (cx >= 0) g2x = cx; }
+    local v2 = this.BuildAndLaunch(g2wDepot, g2eDepot);
+    for (local launchTry = 0; launchTry < 3; launchTry++) {
+        local last2 = -999, still2 = 0, advanced = false;
+        g2x = g2bx - 1;
+        for (local s = 0; s < 24; s++) {
+            GSController.Sleep(15);
+            local cx = this.Tx(v2);
+            if (cx >= 0) g2x = cx;
+            if (cx > g2bx) advanced = true;
+            if (cx == last2) still2++; else still2 = 0;
+            last2 = cx;
+            // stable and clearly arrived (past the signal on a pass, or held at the signal on a
+            // block): the position has latched, stop polling early.
+            if (still2 >= 3 && cx > g2bx) break;
+        }
+        if (advanced) break;   // reader moved onto the lane, g2x is a real read
+        // wedged at the start: scrap and relaunch a fresh reader.
+        if (v2 != null && GSVehicle.IsValidVehicle(v2)) GSVehicle.SellVehicle(v2);
+        GSController.Sleep(8);
+        v2 = this.BuildAndLaunch(g2wDepot, g2eDepot);
+    }
     return { g1x = g1x, g2x = g2x, grest = grest, sig2 = g2sigx };
 }
 
