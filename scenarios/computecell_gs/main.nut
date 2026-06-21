@@ -44,6 +44,36 @@ function ComputeCellMain::PickEngine(rt) {
     foreach (e, _ in GSEngineList(GSVehicle.VT_RAIL)) if (GSEngine.IsBuildable(e)) return e;
     return null;
 }
+// Build a reader/feeder in `depot`, retrying until the handle is valid (a transient build
+// failure on a fresh server returns an invalid vehicle, the observed -1 launch flake), give it
+// its order, then dispatch it and CONFIRM it actually leaves the depot. The observed whole-run
+// "all readers stuck at their west depot" stall (readout OR s24 17 17 17 17) is exactly a reader
+// that built but never left the depot: StartStopVehicle can be dropped while a build-command
+// backlog is draining on a fresh/contended server. So we nudge it out over a long window and
+// re-append the order if it ever got lost. Returns the (valid) vehicle handle, or null.
+function ComputeCellMain::BuildAndLaunch(depot, dest) {
+    local v = null;
+    for (local b = 0; b < 8; b++) {
+        v = GSVehicle.BuildVehicle(depot, this.eng);
+        if (GSVehicle.IsValidVehicle(v)) break;
+        GSController.Sleep(8);
+    }
+    if (!GSVehicle.IsValidVehicle(v)) return null;
+    GSOrder.AppendOrder(v, dest, GSOrder.OF_NON_STOP_INTERMEDIATE);
+    GSController.Sleep(6);
+    // Persistently nudge the train out of the depot. Re-issue Start each iteration until the
+    // train is on open track (not in a depot). Re-append the order if the count dropped to 0.
+    for (local r = 0; r < 30; r++) {
+        if (GSVehicle.IsStoppedInDepot(v)) {
+            if (GSOrder.GetOrderCount(v) == 0) GSOrder.AppendOrder(v, dest, GSOrder.OF_NON_STOP_INTERMEDIATE);
+            GSVehicle.StartStopVehicle(v);
+        } else {
+            break;
+        }
+        GSController.Sleep(5);
+    }
+    return v;
+}
 function ComputeCellMain::Tx(v) {
     if (v == null || !GSVehicle.IsValidVehicle(v)) return -1;
     return GSMap.GetTileX(GSVehicle.GetLocation(v));
@@ -214,31 +244,49 @@ function ComputeCellMain::Case(g, bits) {
 
 // Build one independent OR-chain copy for input combo `bits`, at row band offset `dy`.
 // g0cell/g1cell are the placed NOR2 and NOT cells. Returns [g1x, g2x] raw reader x.
+//
+// COUPLING = fix path (A), the placement-constrained chain layout that reproduces the
+// VERIFIED norchain geometry from the emitted placement. norchain only merged the two
+// signal blocks because gate2's input block OVERLAPPED gate1's frozen rest tile via a
+// SHORT PURE-VERTICAL signal-free spur (no horizontal run). The toolchain places gate2
+// ~17 tiles east of gate1, which turned the spur into a long L that does NOT merge in
+// 15.3 (the documented blocker). So here the consumer cell is CO-LOCATED relative to its
+// driver: gate2 is stamped 3 rows below gate1 with its x chosen so its input TAP lands in
+// exactly the column of gate1's frozen rest tile (grest), and the coupling is a 3-row pure
+// vertical spur at x=grest, identical to the proven norchain spur. Every coordinate is
+// derived from the PLACED gate1 origin (g0cell.x/.y), so moving gate1 in the placement
+// moves the whole chain. This is the chain placement constraint applied at stamp time.
 function ComputeCellMain::RunCopyOR(g0cell, g1cell, dy, bits) {
-    // gate1 on the band row, gate2 three rows below; the coupling runs on the row between them.
+    // gate1 = NOR2 at its placed origin (band-shifted). Lane row g1.Y, taps, signals as usual.
     local g1 = this.GeomAt(g0cell, dy);          // gate1 = NOR2
-    local g2 = this.GeomAt(g1cell, dy + 3);      // gate2 = NOT, on the lower lane
     // GREST: gate1's reader natural REST tile when it passes. A passing reader coasts ~2 tiles
     // past the terminating signal and stops (the norchain "held a tile early" behaviour), so its
-    // output train always rests just east of gate1's terminating signal. We tap gate1's output
-    // bit there, NOT at a distant tile it never reaches. Derived from gate1's placed geometry.
+    // output train always rests just east of gate1's terminating signal. Derived from gate1's geom.
     local grest = g1.sig2x + 2;
-    // Couple into gate2's input block at the tile just WEST of its terminating signal
-    // (sig2x - 1). That tile is in the protected input block but is NOT a tap, so it has no
-    // feeder depot north of it for the coupling vertical to collide with. Placement-derived.
-    local cinx  = g2.sig2x - 1;
-    local crow  = g1.Y + 1;     // intermediate coupling row, clear between the two lanes.
 
-    // Build gate1: lane bx..grest+1, west depot, an east depot just past grest so gate1's lane
-    // east of its terminating signal is a THROUGH block (a dead end here triggers the norchain
-    // "reader held a tile early" misfire, observed when the east depot is removed). The reader
-    // coasts to grest and rests there on pass. Reader + terminating signals, input taps follow.
-    for (local x = g1.bx; x <= grest; x++)
+    // gate2 = NOT, CO-LOCATED 3 rows below gate1 so its input TAP column == grest. With the
+    // gate Geom (bx=cx+1, sigx=bx+6, first tap=sigx+1), tap == cx+8, so cx2 = grest-8 lands the
+    // tap exactly on gate1's rest column. The whole gate2 geometry is then derived from gate1.
+    local g2bx   = grest - 7;          // = cx2 + 1
+    local g2sigx = g2bx + 6;           // gate2 reader signal x (= grest - 1)
+    local g2tap  = g2sigx + 1;         // gate2 input tap x (== grest)
+    local g2sig2x = g2sigx + 1 + 2;    // gate2 terminating signal (n=1)
+    local g2eastx = g2sig2x + 2;       // gate2 east depot (reader rests here on pass)
+    local g2Y    = g1.Y + 3;           // gate2 lane row, three below gate1 (norchain gy2=gy1+3)
+    // INVARIANT: g2tap == grest, so gate1's frozen rest tile and gate2's input tap share a column
+    // and the coupling is a pure-vertical spur (the only construction that merges the blocks in 15.3).
+
+    // ---- gate1: lane bx..g1eastx, west depot, east depot FAR past grest so the reader is on
+    // OPEN TRACK (in the block) when frozen at grest, exactly like norchain (depot at CPLX+4).
+    // A near depot lets the passing reader roll into the depot (removed from the block) before
+    // the freeze catches it, so the merge would read empty. grest+5 keeps it clearly on track.
+    local g1eastx = grest + 5;
+    for (local x = g1.bx; x <= g1eastx - 1; x++)
         GSRail.BuildRailTrack(GSMap.GetTileIndex(x, g1.Y), GSRail.RAILTRACK_NE_SW);
     g1.wdepot <- GSMap.GetTileIndex(g1.wdepot_x, g1.Y);
     GSRail.BuildRailDepot(g1.wdepot, GSMap.GetTileIndex(g1.bx, g1.Y));
-    local g1eDepot = GSMap.GetTileIndex(grest + 1, g1.Y);
-    GSRail.BuildRailDepot(g1eDepot, GSMap.GetTileIndex(grest, g1.Y));
+    local g1eDepot = GSMap.GetTileIndex(g1eastx, g1.Y);
+    GSRail.BuildRailDepot(g1eDepot, GSMap.GetTileIndex(g1eastx - 1, g1.Y));
     GSRail.BuildSignal(GSMap.GetTileIndex(g1.sigx,  g1.Y), GSMap.GetTileIndex(g1.sigx - 1,  g1.Y), GSRail.SIGNALTYPE_NORMAL);
     GSRail.BuildSignal(GSMap.GetTileIndex(g1.sig2x, g1.Y), GSMap.GetTileIndex(g1.sig2x - 1, g1.Y), GSRail.SIGNALTYPE_NORMAL);
     g1.inDepots <- [];
@@ -249,28 +297,37 @@ function ComputeCellMain::RunCopyOR(g0cell, g1cell, dy, bits) {
         GSRail.BuildRailTrack(GSMap.GetTileIndex(tx, g1.Y), GSRail.RAILTRACK_NW_NE);
         g1.inDepots.append(d);
     }
-    // Stamp gate2 normally (with its east depot, where its reader rests on pass).
-    this.StampGeom(g1cell, g2, true);
 
-    // COUPLING = the emitted routed net gate1.output -> gate2.input, realised in track with NO
-    // signals so gate1's output block and gate2's input block are ONE block. We branch off a
-    // MID-BLOCK tile of gate1's output block (ctap = sig2x + 1, clear of the east-depot-adjacent
-    // grest tile), run an intermediate row east, then drop into gate2's input block:
-    //   (ctap, g1.Y) -> down -> (ctap, crow) -> east along crow -> (cinx, crow)
-    //                -> down -> (cinx, g2.Y) = a non-tap tile of gate2's input block.
-    // A gate1 reader resting in its output block therefore occupies gate2's input block; a held
-    // gate1 (reader west of its signals) leaves that block empty.
-    // Corner pieces chosen for BLOCK CONNECTIVITY (each tile shares a track edge with the next):
-    // +x (east) exits the SW edge / enters the NE edge; +y (south) exits SE / enters NW.
-    local ctap = g1.sig2x + 1;
-    GSRail.BuildRailTrack(GSMap.GetTileIndex(ctap, g1.Y), GSRail.RAILTRACK_NE_SE);    // lane (NE) + branch down (SE)
-    GSRail.BuildRailTrack(GSMap.GetTileIndex(ctap, crow), GSRail.RAILTRACK_NW_SW);    // arrive from N (NW), turn east (SW)
-    for (local x = ctap + 1; x < cinx; x++)
-        GSRail.BuildRailTrack(GSMap.GetTileIndex(x, crow), GSRail.RAILTRACK_NE_SW);   // east run
-    GSRail.BuildRailTrack(GSMap.GetTileIndex(cinx, crow), GSRail.RAILTRACK_NE_SE);    // arrive from W (NE), turn down (SE)
-    for (local y = crow + 1; y < g2.Y; y++)
-        GSRail.BuildRailTrack(GSMap.GetTileIndex(cinx, y), GSRail.RAILTRACK_NW_SE);   // vertical
-    GSRail.BuildRailTrack(GSMap.GetTileIndex(cinx, g2.Y), GSRail.RAILTRACK_NW_NE);    // arrive from N (NW), join lane (NE)
+    // ---- gate2: NOT lane on row g2Y, co-located so its tap (g2tap) sits at x=grest. Built by
+    // hand (not StampGeom) so the geometry is the norchain-faithful one derived above.
+    for (local x = g2bx; x < g2eastx; x++)
+        GSRail.BuildRailTrack(GSMap.GetTileIndex(x, g2Y), GSRail.RAILTRACK_NE_SW);
+    local g2wDepot = GSMap.GetTileIndex(g2bx - 1, g2Y);
+    GSRail.BuildRailDepot(g2wDepot, GSMap.GetTileIndex(g2bx, g2Y));
+    local g2eDepot = GSMap.GetTileIndex(g2eastx, g2Y);
+    GSRail.BuildRailDepot(g2eDepot, GSMap.GetTileIndex(g2eastx - 1, g2Y));
+    GSRail.BuildSignal(GSMap.GetTileIndex(g2sigx,  g2Y), GSMap.GetTileIndex(g2sigx - 1,  g2Y), GSRail.SIGNALTYPE_NORMAL);
+    GSRail.BuildSignal(GSMap.GetTileIndex(g2sig2x, g2Y), GSMap.GetTileIndex(g2sig2x - 1, g2Y), GSRail.SIGNALTYPE_NORMAL);
+    // gate2 takes its only input from the inter-cell spur, NOT from a parked train, so its tap tile
+    // (g2tap == grest) gets no feeder depot: it stays a plain lane tile that the vertical spur joins
+    // from the north, keeping that column clear for the pure-vertical coupling.
+
+    // ---- COUPLING: the emitted routed net gate1.output -> gate2.input, realised as the proven
+    // norchain SHORT PURE-VERTICAL spur (NO signals) at x=grest from gate1's lane down to gate2's
+    // lane, so gate1's output block and gate2's input block become ONE block. Identical to
+    // norchain BuildCopy's spur (the only construction that merged the blocks in 15.3).
+    //   (grest, g1.Y): lane piece (NE_SW) already there; add SW_SE so it also turns down (south).
+    //   (grest, mid):  pure vertical NW_SE.
+    //   (grest, g2Y):  lane piece (NE_SW) already there; add NW_NE so it joins from the north.
+    GSRail.BuildRailTrack(GSMap.GetTileIndex(grest, g1.Y), GSRail.RAILTRACK_SW_SE);
+    for (local y = g1.Y + 1; y < g2Y; y++)
+        GSRail.BuildRailTrack(GSMap.GetTileIndex(grest, y), GSRail.RAILTRACK_NW_SE);
+    GSRail.BuildRailTrack(GSMap.GetTileIndex(grest, g2Y), GSRail.RAILTRACK_NW_NE);
+
+    // Let the build/terraform command backlog drain before running any reader. On a contended
+    // server (a parallel OpenTTD eating CPU), reader dispatch issued on top of a still-draining
+    // build queue is the all-readers-stuck-in-depot stall; a short settle removes it.
+    GSController.Sleep(15);
 
     // Pre-park gate1's primary inputs a,b per the combo.
     for (local i = 0; i < g1.n; i++)
@@ -279,18 +336,8 @@ function ComputeCellMain::RunCopyOR(g0cell, g1cell, dy, bits) {
 
     // Run gate1's reader toward its east depot; it coasts to grest and rests there iff it passes
     // (inputs absent). FREEZE it the moment x reaches grest so it stays parked on the coupling
-    // tap. If held by an input it never reaches grest (stays west of sig19) and gate2's input
-    // block stays empty.
-    local v1 = GSVehicle.BuildVehicle(g1.wdepot, this.eng);
-    GSOrder.AppendOrder(v1, g1eDepot, GSOrder.OF_NON_STOP_INTERMEDIATE);
-    GSController.Sleep(5);
-    for (local r = 0; r < 8; r++) {
-        if (GSVehicle.IsStoppedInDepot(v1)) GSVehicle.StartStopVehicle(v1);
-        GSController.Sleep(4);
-        if (!GSVehicle.IsStoppedInDepot(v1)) break;
-    }
-    // A passing reader coasts to grest and rests on gate1's output block (which the coupling
-    // ties into gate2's input block). Freeze it there. A held reader never reaches grest.
+    // tap. If held by an input it never reaches grest and gate2's input block stays empty.
+    local v1 = this.BuildAndLaunch(g1.wdepot, g1eDepot);
     local g1x = this.Tx(v1);
     for (local s = 0; s < 30; s++) {
         GSController.Sleep(10);
@@ -300,9 +347,12 @@ function ComputeCellMain::RunCopyOR(g0cell, g1cell, dy, bits) {
     }
     GSController.Sleep(8);
 
-    // Run gate2's reader; its raw final x is the OR output (x > gate2.sigx => OR 1).
-    local rr = this.RunReader(g2);
-    return { g1x = g1x, g2x = rr.fx, grest = grest, sig2 = g2.sigx };
+    // Run gate2's reader; its raw final x is the OR output (x > g2sigx => OR 1). Built and driven
+    // inline (not RunReader) since gate2's geometry here is the co-located one, not a Geom table.
+    local v2 = this.BuildAndLaunch(g2wDepot, g2eDepot);
+    local g2x = g2bx - 1;
+    for (local s = 0; s < 16; s++) { GSController.Sleep(18); local cx = this.Tx(v2); if (cx >= 0) g2x = cx; }
+    return { g1x = g1x, g2x = g2x, grest = grest, sig2 = g2sigx };
 }
 
 function ComputeCellMain::StartOR(g0cell, g1cell) {
@@ -316,14 +366,15 @@ function ComputeCellMain::StartOR(g0cell, g1cell) {
     GSLog.Info("OR: gate1 '" + g0cell.id + "' -> net '" + link + "' -> gate2 '" + g1cell.id
                + "' routedNet=" + haveRoute);
 
-    // Flatten a generous box covering all four copy bands. The eastmost tile is gate2's east
-    // depot (the coupling tap cinx = gate2.taps[0] lies west of it); the westmost is gate1's
-    // origin. Bands are 8 rows apart; the last band's gate2 lane is g1cell.y + 3 + lastDy.
+    // Flatten a generous box covering all four copy bands. gate2 is co-located 3 rows below
+    // gate1 with its tap at grest = g1.sig2x+2, and its east depot at grest+4, so the eastmost
+    // tile is grest+4. The westmost is gate1's west depot at g0cell.x. Bands are 8 rows apart;
+    // the last band's gate2 lane is (g0cell.y + 1) + 3 + lastDy.
     local gA = this.GeomAt(g0cell, 0);
-    local gB = this.GeomAt(g1cell, 3);
-    local xmax = (gB.eastx > gA.eastx ? gB.eastx : gA.eastx);
+    local grest0 = gA.sig2x + 2;
+    local xmax = grest0 + 5;   // gate1 east depot at grest+5 (gate2 east depot at grest+4)
     local lastDy = 3 * 8;   // four bands, 8 rows apart
-    this.Prepare(g0cell.x - 2, g0cell.y - 2, xmax + 3, g1cell.y + 3 + lastDy + 3);
+    this.Prepare(g0cell.x - 2, g0cell.y - 2, xmax + 3, gA.Y + 3 + lastDy + 3);
     this.Say("CCEL OR build");
 
     local r00 = this.RunCopyOR(g0cell, g1cell, 0,  0);

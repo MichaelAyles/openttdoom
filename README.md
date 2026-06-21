@@ -65,10 +65,12 @@ finish a frame), which is large but no longer a mystery.
    GameScript-mediated. A pure track-signal interlock failed on an OpenTTD reservation-coupling
    (reading the clock block's occupancy stalls the clock), and there is no physical output
    register. A real machine needs a self-sustaining clock and a one-edge latch.
-2. **Multi-cell wiring.** A single emitted cell now computes (the emitter stamps the real geometry,
-   not placeholder track), but a 2-cell circuit does not yet: carrying a bit from one cell's output
-   across the routing gap into the next cell's input block does not reliably merge the signal blocks
-   in OpenTTD. Wiring emitted cells together is the immediate next hard piece.
+2. **Multi-cell wiring at scale.** A single emitted cell computes, and a 2-cell circuit now does too:
+   an emitted OR = NOT(NOR) computes 0,1,1,1, with the bit carried physically over a track spur (the
+   placer co-locates the consumer under its driver so the coupling is the proven short vertical spur).
+   The mechanism is verified, but its reliability is still flaky under load (train-dispatch races), and
+   it only covers a 2-stage chain with fan-out 1. Generalising the co-location to fan-out greater than
+   one, deeper chains, and wider gates, reliably, is the work between here and emitting the whole adder.
 
 1. **No self-contained clock yet.** The clocked gate works but the per-edge release is
    GameScript-mediated. A pure track-signal interlock failed on an OpenTTD reservation-coupling

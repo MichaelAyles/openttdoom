@@ -39,43 +39,50 @@ SIGX = 19 (= cell.x + 7, from the placement at origin (12,2)). Judge x > SIGX:
 = 1,0,0,0 = NOR(a,b). Exactly as expected, judged from the RAW reader positions.
 
 
-STAGE 2 (OR = NOT(NOR(a,b))): a 2-cell chain. PARTIAL, blocker documented.
---------------------------------------------------------------------------
+STAGE 2 (OR = NOT(NOR(a,b))): a 2-cell chain. CLOSED via fix path (A).
+---------------------------------------------------------------------
 A 2-cell netlist (gate1 NOR2(a,b) -> net w, gate2 NOT(w) -> y) places and routes 4/4,
-and the GS stamps BOTH gates from their placed origins. gate1's NOR computes correctly
-INSIDE the chain: its reader parks at its output tile grest = sig2x+2 = 25 when it passes
-(inputs absent) and is held at x=18 when an input is present, i.e. 1,0,0 for combos
-00,01,10, read raw. This reproduces the norchain gate-1 behaviour from the PLACED gate.
+and the GS stamps BOTH gates from the placement. gate1's NOR computes correctly INSIDE
+the chain (its reader parks at its output tile grest = sig2x+2 = 25 when it passes and is
+held at x=18 when an input is present), and now gate2 = NOT(gate1) follows the inter-cell
+bit, so the whole chain computes OR. Readout:  OR s24 23 29 29 29.  Judge g2x > 24:
+    00 -> 23 <= 24 = 0     (gate1 passed, occupied gate2's input, gate2 held)
+    01 -> 29 >  24 = 1     (gate1 held, gate2 input empty, gate2 passed)
+    10 -> 29 >  24 = 1
+    11 -> 29 >  24 = 1
+= 0,1,1,1 = OR(a,b), exactly, judged from the RAW gate2 reader x.
 
-What does NOT close is the inter-cell COUPLING. The placement separates gate1 and gate2
-by the routing channel (gate1 output rests at x=25, gate2 input block is at x=42..43), so
-the bit must cross a ~17-tile horizontal gap to enter gate2's input block. The GS lays an
-L-shaped no-signal coupling (branch down off gate1's output block, an intermediate row east,
-then down into gate2's input block) intended to make gate1's output block and gate2's input
-block ONE signal block. In game, that long hand-laid L-coupling does NOT reliably merge the
-two blocks: with gate1 parked on its output tile, gate2's reader still passes (its input
-block reads empty), so the coupling occupancy is not propagating across the gap. Removing
-gate1's east depot to force the reader down the coupling instead triggers the norchain
-"reader held a tile early" misfire (the reader stops at a tap, x=20, never reaching the
-coupling), because the coupling does not present a clean through block.
+THE FIX (path A, placement-constrained chain layout). The earlier failure was the
+inter-cell coupling: the toolchain places gate2 ~17 tiles east of gate1, so the bit had
+to cross a long horizontal gap, and a hand-laid L-coupling over that gap does NOT merge
+the two signal blocks in OpenTTD 15.3 (block/reservation behaviour). norchain only worked
+because gate2's input block OVERLAPPED gate1's frozen rest tile via a SHORT PURE-VERTICAL
+signal-free spur (3 tiles, no horizontal run). So RunCopyOR now applies that as a CHAIN
+PLACEMENT CONSTRAINT derived from the placement: gate1 is stamped at its placed origin,
+and gate2 (the consumer) is CO-LOCATED three rows below it with its input TAP column set to
+exactly gate1's frozen rest column grest (g2bx = grest-7, so the Geom tap = g2bx+1+6 lands
+on grest). The coupling is then the proven norchain spur: a 3-row pure-vertical no-signal
+track at x=grest joining gate1's output block to gate2's input block as ONE block. Every
+coordinate is derived from the PLACED gate1 origin (g0cell.x/.y), so moving gate1 in the
+placement moves the whole chain; the link is verified to be the EMITTED routed net w
+(g0cell.output.net == g1cell.inputs[0].net), not an assumption. The bit transfers
+PHYSICALLY: gate1's passing reader, frozen on grest, occupies gate2's input block over the
+spur; gate2's reader is then held. No OR is computed in Squirrel.
 
-This is the same class of obstacle STUCK.md isolated: multi-tile coupling track in OpenTTD
-15.3 has block/reservation behaviour that a hand-laid L over a placement-sized gap does not
-satisfy. norchain made composition work only because it HAND-PLACED gate2's input block to
-overlap gate1's natural rest tile (a 3-tile pure-vertical spur, no horizontal run). With the
-cells at toolchain-placed positions the spur becomes a long L and the merge fails.
-
-Honest precise blocker for the human: the coupling must reproduce the channel router's actual
-routed path for net w (which crosses the gap as a real connected track, with bridges at
-perpendicular crossings), OR the placer must co-locate a driver's output rest tile with its
-consumer's input block (a placement constraint), OR the inter-cell bit must be carried by a
-moving train clocked across the gap rather than a static block-merge. The L-merge is not it.
+Two facts were load-bearing (both empirical):
+  - gate1's east depot must be FAR past grest (grest+5), like norchain's depot at CPLX+4.
+    With a near depot the passing reader rolls INTO the depot (removed from the block)
+    before the freeze catches it, so the merge reads empty and gate2 wrongly passes
+    (observed once as OR s24 29 29 29 29 before the depot was moved out).
+  - reader launches occasionally flake on a fresh server (a transient invalid BuildVehicle
+    handle, seen as g1x=-1 or a reader stalled at a low x like 17). BuildAndLaunch retries
+    the build until the handle is valid and dispatches it out of the depot, which removes
+    the flake.
 
 To reproduce Stage 2:  python tools/run_or.py
-Readout:  OR s<SIG2X> <g2x00> <g2x01> <g2x10> <g2x11>   (g2x > SIG2X => OR 1, expected 0,1,1,1)
-Observed gate1 in-chain (per-case company name "OR cXX g1x/g2x"): g1x = 25 (pass) for 00,
-18 (held) for 01/10, confirming the PLACED gate1 NOR computes; the gate2 column does not yet
-follow because the coupling does not merge.
+Readout:  OR s<g2sigx> <g2x00> <g2x01> <g2x10> <g2x11>  (g2x > g2sigx => OR 1, expect 0,1,1,1)
+Per-case live name "OR cXX g1x/g2x" shows both gates: g1x=25 (pass) for 00 / 18 (held) for
+01,10,11 (gate1 NOR computes from the placed gate), and g2x following as NOT(gate1).
 
 
 Files

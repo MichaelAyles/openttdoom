@@ -109,20 +109,38 @@ STILL OPEN (the rest of the machine), now resting on a further-verified foundati
   - Multi-input NOR with 3+ inputs (the 2-input case is proven; wider fan-in is the same idea,
     all taps in one protected block, but was not built/verified here).
   - Wiring the per-net output train-presence into the framebuffer signal tiles for the viewer.
-  - Folding this geometry into the emitter: DONE for ONE cell (SC1). `scenarios/computecell_gs/` plus
-    the CELL_W=14/CELL_H=3 footprint in `place.py` make place-and-route stamp a real computing NOR
-    cell at the placed position (verified, readout `SC1 s19 24 18 12 12` = 1,0,0,0 = NOR, the
-    geometry derived from cell.x/cell.y, not hand-coded). What is NOT done is wiring TWO emitted cells
-    together (SC2): a 2-cell OR=NOT(NOR) stamps and gate1 computes in-chain, but the inter-cell bit
-    transfer across the routing gap (gate1 output rests ~17 tiles from gate2's input block) does not
-    reliably merge the two signal blocks in OpenTTD 15.3. This is the multi-tile coupling-geometry
-    class. Fix paths (documented in computecell_gs/readme.txt): reproduce the channel router's actual
-    routed track for the net (a real connected path with bridges at crossings) instead of a hand-laid
-    L-coupling; OR add a placement constraint co-locating a driver's output rest tile with its
-    consumer's input block (the verified norchain only worked because gate2's input overlapped gate1's
-    rest tile via a short pure-vertical spur); OR carry the inter-cell bit on a train CLOCKED across
-    the gap rather than a static block-merge. Wide fan-in (>2 input) computing cells are also unproven
-    in game (the stamp covers NOT and NOR2; the adder's wider NORs route fine but were not stamped).
+  - Folding this geometry into the emitter: DONE for ONE cell (SC1); the SC2 two-cell MECHANISM works
+    but reliability is flaky under CPU contention (clean re-verify pending).
+    `scenarios/computecell_gs/` plus the CELL_W=14/CELL_H=3 footprint in `place.py` make place-and
+    -route stamp a real computing NOR cell at the placed position (verified, readout
+    `SC1 s19 24 18 12 12` = 1,0,0,0 = NOR, the geometry derived from cell.x/cell.y, not hand-coded).
+    SC2: wiring TWO emitted cells together. A 2-cell OR = NOT(NOR(a,b)) netlist places and routes 4/4,
+    the GS stamps both cells from the placement, and the inter-cell bit transfers PHYSICALLY over track:
+    readout `OR s24 23 29 29 29` (g2sigx=24; x>24 => OR 1) = 0,1,1,1 = OR(a,b), judged from the raw
+    gate2 reader x. The MECHANISM is verified by both agents (emitted-from-placement, physical coupling,
+    no OR in Squirrel). RELIABILITY is the open caveat: the build agent got 5/5 after hardening, but
+    INDEPENDENT verification got 3/5, the two failures being train-dispatch races (a reader stuck in its
+    depot, an input not parked), not a logic error, and made worse by running two OpenTTD instances at
+    once. A clean no-contention re-verify is pending.
+    The fix was path (A), the placement constraint: the earlier blocker was that the toolchain places
+    gate2 ~17 tiles east of gate1, so the inter-cell bit had to cross a long horizontal gap, and a
+    hand-laid L-coupling over that gap does NOT merge the two signal blocks in OpenTTD 15.3. norchain
+    only worked because gate2's input block overlapped gate1's frozen rest tile via a SHORT PURE
+    -VERTICAL signal-free spur. So RunCopyOR now CO-LOCATES the consumer relative to its driver: gate1
+    is stamped at its placed origin and gate2 three rows below it, with gate2's input-tap column
+    derived from gate1's frozen output-rest column (grest), and the coupling is the proven norchain
+    3-row pure-vertical spur. Everything derives from the placed gate1 origin (moving gate1 moves the
+    whole chain), and the driver->consumer link is verified to be the EMITTED routed net w. Two crux
+    facts: gate1's east depot must be FAR past the rest tile so the passing reader stays on open track
+    (in the block) when frozen, not rolled into a near depot (a near depot gave OR s24 29 29 29 29,
+    the merge reading empty); and reader launches need BuildVehicle retry + persistent depot-exit
+    nudge to kill a stochastic whole-run launch stall (OR s24 17 17 17 17, all readers stuck in their
+    west depot) that the parallel speed-fork's openttd_fast.exe CPU contention made more frequent.
+    STILL UNPROVEN in game: wide fan-in (>2 input) computing cells (the stamp covers NOT and NOR2; the
+    adder's wider NORs route fine but were not stamped), and chains DEEPER than two stages or with
+    fan-out > 1 (each consumer co-locates under one driver, so a multi-fan-out net or a 3+ stage chain
+    needs the co-location generalised). The block-merge coupling itself is now proven for the 2-cell
+    case.
 
 Concrete next step: replace the GS-mediated clock release in main_sync.nut with a pure track-signal
 interlock (a clock pulse on a shared block that opens a reader's release signal once per lap), add a

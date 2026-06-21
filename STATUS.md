@@ -188,9 +188,35 @@ Total test count: 80 passing (`python -m pytest -q`).
   Squirrel. Verified: the orchestrator got 4/4 identical fresh runs, the build agent 5/5, an
   adversarial verifier 4/5 (one run a polling-timing flake, not a logic fault), and the source was
   audited to confirm emitted-from-placement. This is the first time the pipeline produces WORKING
-  hardware in OpenTTD, not just visible structure. STILL OPEN (SC2): wiring two emitted cells
-  together. A 2-cell OR=NOT(NOR) stamps and gate1 computes in-chain, but the inter-cell bit transfer
-  across the routing gap does not reliably merge the two signal blocks (see STUCK.md).
+  hardware in OpenTTD, not just visible structure.
+  NOW ALSO ACHIEVED (SC2, mechanism verified, reliability flaky under CPU contention): wiring TWO
+  emitted cells together. A 2-cell OR = NOT(NOR(a,b)) netlist
+  (gate1 NOR2(a,b) -> net w, gate2 NOT(w) -> y) runs through the real place_and_route (places +
+  routes 4/4), the GS stamps gate1 at its placed origin and CO-LOCATES gate2 (the consumer) three
+  rows below it with its input tap column derived from gate1's frozen output-rest column, and the
+  inter-cell bit transfers PHYSICALLY over a short pure-vertical no-signal track spur (the proven
+  norchain coupling): gate1's passing reader, frozen on its rest tile, occupies gate2's input block,
+  so gate2 = NOT(gate1) = OR. The link is verified to be the EMITTED routed net w (g0.output.net ==
+  g1.input.net), and every coordinate derives from the placed gate1 origin (moving gate1 in the
+  placement moves the whole chain). Readout `OR s24 23 29 29 29` (g2sigx=24; x>24 => OR 1): judged
+  from the RAW gate2 reader x, 23->0, 29->1, 29->1, 29->1 = 0,1,1,1 = OR(a,b), no OR computed in
+  Squirrel. The fix is path (A) (placement-constrained chain layout, the consumer co-located directly
+  below its driver via a short pure-vertical spur), which made the block-merge that the earlier long
+  L-coupling could not. Two crux facts: gate1's east depot must be FAR past the rest tile (grest+5)
+  so the passing reader stays on open track (in the block) when frozen, not rolled into a near depot
+  (a near depot gave `OR s24 29 29 29 29`, the merge reading empty); and reader launches need a
+  BuildVehicle retry plus a persistent depot-exit nudge (BuildAndLaunch) to kill a stochastic
+  whole-run launch stall (`OR s24 17 17 17 17`, every reader stuck in its west depot) that the
+  parallel speed-fork's openttd_fast.exe CPU contention made more frequent. VERIFIED that the
+  MECHANISM is real (both agents confirmed, source-audited: emitted-from-placement, the coupling is
+  physical track, the output is read only from raw gate2 reader x, no OR in Squirrel) and that it
+  reproduces `OR s24 23 29 29 29` = 0,1,1,1. RELIABILITY is the honest caveat: the build agent got
+  5/5 after hardening, but INDEPENDENT verification got only 3/5, the two failures being train-dispatch
+  races (a reader stuck in its depot; an input train not parked), NOT a logic error, and made more
+  frequent by running two OpenTTD instances at once (the parallel speed fork). A clean re-verification
+  with no CPU contention is pending (to be run once the speed-fork track finishes). So SC2's logic is
+  proven; its dispatch reliability under contention is the open item. Run with `tools/run_or.py`; see
+  scenarios/computecell_gs/ (RunCopyOR/BuildAndLaunch) and readme.txt Stage 2.
 
 ### M3, toolchain spine. DONE, verified in software.
 

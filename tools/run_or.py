@@ -1,12 +1,18 @@
-"""Stage 2 driver: emit a 2-CELL OR = NOT(NOR(a,b)) placement and run it through the GS.
+"""Stage 2 (SC2) driver: emit a 2-CELL OR = NOT(NOR(a,b)) placement and run it through the GS.
 
 gate1 NOR2(a,b) -> net w, gate2 NOT(w) -> y. The toolchain places both cells and routes the
 inter-cell net w (gate1.output -> gate2.input). The computecell GS reads the placement, stamps
-both gates from their placed origins, and carries the inter-cell bit on the coupling realising
-that routed net (gate1's passing reader parks in gate2's input block). The four gate2 raw reader
-x are read out of the company name; OR = 0,1,1,1 is judged externally from x > sig.
+gate1 at its placed origin, and CO-LOCATES gate2 three rows below it (a chain placement
+constraint derived from gate1's placed geometry) so gate2's input tap sits on gate1's frozen
+output rest column. The inter-cell bit then transfers PHYSICALLY over a short pure-vertical
+no-signal track spur (the proven norchain coupling): gate1's passing reader, frozen on its rest
+tile, occupies gate2's input block, so gate2 = NOT(gate1) = OR. The link is verified to be the
+EMITTED routed net w, not an assumption. The four gate2 raw reader x are read out of the company
+name; OR = 0,1,1,1 is judged externally from x > sig (no OR computed in Squirrel).
 
-Usage: python tools/run_or.py [--timeout 300]
+Verified: OR s24 23 29 29 29 (g2sigx=24; x>24 => OR 1) = 0,1,1,1, reproduced across fresh runs.
+
+Usage: python tools/run_or.py [--timeout 360]
 """
 
 from __future__ import annotations
