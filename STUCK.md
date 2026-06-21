@@ -7,14 +7,15 @@ The short version: everything that can be proven in software is proven (see STAT
 single hardest piece the brief flagged, a logic gate that actually computes inside OpenTTD, is
 SOLVED and independently verified (a 2-input NOR, truth table 1,0,0,0). Gate COMPOSITION is now
 also verified in game: a two-gate chain computes OR(a,b) = NOT(NOR(a,b)), readout
-`OR s40 39 41 41 41` giving 0,1,1,1 = OR (scenarios/norchain_gs/). A clock train (a train looping
-with a stable period) and live re-evaluation of a gate on the same tiles (input poked live, output
-follows, no rebuild, readout `REEVAL s46 52 45 52`) are also verified in game
-(scenarios/clockgate_gs/). What remains is tying the clock and re-evaluation together into a
-RELIABLE synchronous gate (a pure clock-driven release interlock plus a one-edge output register;
-the GS-mediated version works intermittently but did not survive independent re-verification), then
-the framebuffer readout and folding the gate geometry into the place-and-route emitter. Those are
-engineering on working, verified pieces, not unknowns.
+`OR s40 39 41 41 41` giving 0,1,1,1 = OR (scenarios/norchain_gs/). A clock train, live re-evaluation
+of a gate on the same tiles (readout `REEVAL s46 52 45 52`), AND a RELIABLE clock-synchronised NOT
+gate are all verified in game (scenarios/clockgate_gs/): the clocked gate produces NOT(0,1,1,0,1,0) =
+1,0,0,1,0,1, readout `CG 100101`, reproduced in 8 of 8 independent fresh runs. That clock release is
+GameScript-mediated (the GS waits on the clock train's physical position each edge); two things remain
+for a fully self-contained synchronous element: a PURE track-signal release interlock with no GS in the
+timing path (blocked by an OpenTTD reservation-coupling, see the syncgate update under blocker 1) and a
+physical one-edge OUTPUT REGISTER. Beyond that: framebuffer readout and folding the gate geometry into
+the place-and-route emitter. All of this is engineering on working, verified pieces, not unknowns.
 
 ## 1. The physical OpenTTD NOR gate geometry. SOLVED for a single combinational gate AND a 2-gate chain.
 
@@ -86,20 +87,25 @@ NOW ALSO RESOLVED: the CLOCK TRAIN and LIVE RE-EVALUATION on the same tiles (sce
     removing the input first, then disposed in the east depot. See main_reeval.nut.
 
 STILL OPEN (the rest of the machine), now resting on a further-verified foundation:
-  - Clock-SYNCHRONISED sampling (sub-goal 3, NOT VERIFIED, unreliable). main_sync.nut ties each gate
-    sample to the clock train's passage (the GS waits for the clock to enter the loop top run, then
-    samples). The build agent saw the gate output track a driven input schedule in two of its runs
-    (schedule 001100 -> output 110011 = NOT at each edge, each edge released by a clock wait, never
-    the timeout). BUT independent re-verification could NOT reproduce it: a fresh-run verifier got
-    zero clock-released edges in three tries (the clock train stalled, "clkOK-stuck" twice and
-    "clkSTUCK" once), so the consolidated output never appeared. Treat sub-goal 3 as UNRELIABLE and
-    UNCONFIRMED, not proven. What is missing and why it is fragile: the release is GS-mediated (the
-    GameScript polls the clock and dispatches the reader), there is no pure track-signal interlock (a
-    clock-driven signal physically releasing a waiting reader with no GS in the release path), there
-    is no physical one-edge output register, and the clock loop is not perfectly self-sustaining (its
-    two cycling orders occasionally park the train, and per-edge reader disposal can jam the lane).
-    The clock train and the live re-evaluation below it ARE verified; tying them together reliably is
-    the remaining hard piece.
+  - Clock-SYNCHRONISED sampling (now RELIABLE and verified, GS-mediated). main_clocked.nut runs a
+    clocked NOT gate: a clock train circulates a one-way block-signalled loop, and at each of 6 clock
+    edges the GameScript BLOCKS until the clock train crosses a fixed loop phase (a real per-edge clock
+    wait), then drives a fixed input schedule 0,1,1,0,1,0, dispatches a fresh reader, and derives the
+    output bit from the RAW reader position (x>46 = passed = 1). Output = 1,0,0,1,0,1 = NOT(schedule),
+    readout `CG 100101`. VERIFIED RELIABLE: 8 of 8 independent fresh dedicated-server runs all produced
+    CG 100101 (an adversarial verifier got 5/5, the orchestrator got a further 3/3), with the per-edge
+    raw x identical (51 on the input-absent edges, 45 on the input-present edges). This fixes the prior
+    main_sync.nut, which reproduced 0/3. The fixes that made it reliable, all hard-won: keep every
+    company-name readout SHORT (the ~31-char limit silently froze the displayed name and masqueraded as
+    a stall), confirm the clock has circulated >=1 lap before building the gate (with BuildVehicle
+    retry, single clock train only), drain each reader to the depot before the next edge, and wrap the
+    run in try/catch + a re-entry guard so a stray engine reset cannot rebuild over a finished run.
+    HONEST SCOPE: this is GS-mediated clock-synchronised SAMPLING (the GS sits in the per-edge timing
+    path, gated by the clock train's physical position), and it is COMBINATIONAL NOT sampled per edge
+    (output[k] = NOT(input[k]), no register latency). Still open: a PURE track-signal release interlock
+    with no GS in the timing path (blocked by the reservation-coupling described in the syncgate update
+    below), and a physical one-edge OUTPUT REGISTER giving the edge-N = f(edge N-1) latency that
+    gate_model.py specifies.
   - Multi-input NOR with 3+ inputs (the 2-input case is proven; wider fan-in is the same idea,
     all taps in one protected block, but was not built/verified here).
   - Wiring the per-net output train-presence into the framebuffer signal tiles for the viewer.

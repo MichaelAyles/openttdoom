@@ -53,7 +53,7 @@ Total test count: 80 passing (`python -m pytest -q`).
   Timendus 5-quirks ROM that would show it is not vendored). vf_reset is covered by the unit
   tests `test_8xy1_or_vf_reset` and `test_8xy2_and_vf_reset_off` instead.
 
-### M2, one working gate plus composition, a clock train, and live re-evaluation. DONE and verified in game for NOT, 2-input NOR, a 2-gate OR chain, a clock train, and live same-tile re-evaluation. Full clock-synchronised sampling is not yet reliable.
+### M2, computing gates plus a clocked machine's primitives. DONE and verified in game for NOT, 2-input NOR, a 2-gate OR chain, a clock train, live same-tile re-evaluation, and a RELIABLE clock-synchronised NOT gate (8/8 fresh runs). The pure hardware interlock and a one-edge output register remain.
 
 - `scenarios/GATE_DESIGN.md` is the design and research note: how a clocked NOR is meant to
   be realised from track, signals (block, two-way, entry/exit/combo presignals) and a clock
@@ -135,16 +135,23 @@ Total test count: 80 passing (`python -m pytest -q`).
   at x=46) means read A input absent reader x=52 (passed, output 1), read B input poked onto the
   same gate x=45 (held, output 0), read C input removed x=52 (passed, output 1). The same gate's
   output followed the live input 1,0,1 (`main_reeval.nut`).
-  NOT VERIFIED: full clock-synchronised sampling (`main_sync.nut`). The build agent saw the gate
-  output track a driven input schedule (001100 -> 110011 = NOT per edge) in two runs, but
-  independent re-verification could NOT reproduce it (zero clock-released edges in three tries, the
-  clock train stalled). The release is GameScript-mediated, not a pure track-signal interlock, and
-  there is no physical output register, so this is unreliable and is documented as the remaining
-  hard piece in STUCK.md, not claimed as done.
-  STILL OPEN: tying the verified clock and re-evaluation together into a reliable synchronous gate
-  (a pure clock-driven release interlock and a one-edge output register), the one-edge register
-  latency, the framebuffer readout, and folding the geometry into the place-and-route emitter.
-  The chain and these primitives now rest on working, verified pieces rather than unknowns.
+  NOW VERIFIED RELIABLE: a clock-SYNCHRONISED NOT gate (`main_clocked.nut`). A clock train circulates
+  a one-way block-signalled loop; at each of 6 clock edges the GameScript blocks until the clock train
+  crosses a fixed loop phase (a real per-edge clock wait), drives a fixed input schedule 0,1,1,0,1,0,
+  dispatches a fresh reader, and derives the output bit from the RAW reader position. Output =
+  1,0,0,1,0,1 = NOT(schedule), readout `CG 100101`, reproduced in 8 of 8 independent fresh
+  dedicated-server runs (an adversarial verifier 5/5 and the orchestrator a further 3/3), per-edge
+  raw x identical each run (51 on input-absent edges, 45 on input-present). This fixed the prior
+  `main_sync.nut` that reproduced 0/3. The reliability fixes: short readouts (the ~31-char company
+  name limit silently froze a long name and masqueraded as a stall), a confirmed-circulating single
+  clock train before building, draining each reader to the depot per edge, and a try/catch + re-entry
+  guard. Honest scope: this is GS-MEDIATED clock-synchronised sampling (the GS is in the per-edge
+  timing path, gated by the clock train's position) and it is combinational NOT sampled per edge
+  (output[k] = NOT(input[k]), no register latency).
+  STILL OPEN: a PURE track-signal release interlock with no GS in the timing path (blocked by an
+  OpenTTD reservation-coupling, see the syncgate attempt below) and a physical one-edge OUTPUT REGISTER
+  for true edge-N = f(edge N-1) latency; then the framebuffer readout and folding the geometry into the
+  place-and-route emitter. These rest on working, verified pieces rather than unknowns.
 - ATTEMPTED, NOT ACHIEVED: a PURE track-signal clock interlock (`scenarios/syncgate_gs/`). A
   follow-on run tried to replace the GameScript-mediated clock release with a real interlock (the
   clock train's block occupancy physically releasing the reader, plus an output register). It did

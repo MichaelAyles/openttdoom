@@ -29,13 +29,20 @@ How to run (headless, bundled binary)
 
 Variants (each is a self-contained main_*.nut; copy the one you want to main.nut)
 --------------------------------------------------------------------------------
-  main_clock.nut   SUB-GOAL 1: the clock train on a closed loop.
-  main_reeval.nut  SUB-GOAL 2: live re-evaluation of one NOT gate on the same tiles.
-  main_sync.nut    SUB-GOAL 3: clock-released sampling (the synchronous gate attempt).
-  main.nut         a copy of whichever variant was last run/verified.
+  main_clock.nut    SUB-GOAL 1: the clock train on a closed loop.
+  main_reeval.nut   SUB-GOAL 2: live re-evaluation of one NOT gate on the same tiles.
+  main_sync.nut     SUB-GOAL 3: clock-released sampling (UNRELIABLE, 0/3 independently).
+  main_clocked.nut  SUB-GOAL 4: a RELIABLE GS-mediated clocked NOT gate (this run).
+  main.nut          a copy of whichever variant was last run/verified.
 
 The info.nut CreateInstance name must match the variant's class:
-  ClockGateMain (main_clock), ReevalMain (main_reeval), SyncMain (main_sync).
+  ClockGateMain (main_clock), ReevalMain (main_reeval), SyncMain (main_sync),
+  ClockedMain (main_clocked).
+
+To run main_clocked.nut: copy it to ~/OneDrive/Documents/OpenTTD/game/clockgate_gs/main.nut,
+set info.nut CreateInstance to "ClockedMain", set openttd.cfg [game_scripts] first entry to
+"clockgate =", then either drive one run with scenarios/clockgate_gs/run_clocked.sh or the
+five back-to-back reliability runs with scenarios/clockgate_gs/rel5_clocked.sh.
 
 --------------------------------------------------------------------------------
 SUB-GOAL 1: the clock train (VERIFIED)
@@ -131,6 +138,45 @@ HONEST LIMITS (why this is PARTIAL).
 So sub-goal 3 demonstrates clock-released, clock-cadenced re-evaluation whose output
 tracks a known input schedule, but not the full hardware interlock, and not yet reliably
 in one shot. See ../../STUCK.md and the run report.
+
+--------------------------------------------------------------------------------
+SUB-GOAL 4: a RELIABLE GS-mediated clocked NOT gate (RELIABLE)
+--------------------------------------------------------------------------------
+main_clocked.nut is the reliable successor to main_sync.nut. It keeps the GS-mediated
+clocking (acceptable: the GS waits for the clock train's phase each edge and dispatches
+the reader) but fixes every reliability hole that made sub-goal 3 reproduce 0 of 3:
+
+  - RELIABLE CLOCK. The clock loop is now ringed with ONE-WAY NORMAL block signals
+    (syncgate STAGE 1) instead of a plain unsignalled loop with plain-tile waypoint
+    orders. A single train on a one-way-signalled loop reserves block-by-block forward and
+    can never re-path into the depot or mutually deadlock, so it never parks. This was the
+    main_sync clock-stall failure mode, now removed.
+  - CONFIRMED LAUNCH. BuildVehicle + StartStop is retried (up to 3 attempts) and the clock
+    is only accepted once it has CONFIRMED a full lap (left the depot, reached the far
+    bottom run, returned to the left run). On failure the readout is "CKFAIL" and the
+    script stops cleanly without ever restarting Start().
+  - SIMPLER, RACE-FREE SCHEDULE. The input is SET BEFORE the reader is dispatched each
+    edge, so the output read at edge k is NOT(schedule[k]) directly, with no one-edge
+    register latency to approximate (the fragile latency dance of sub-goal 3 is gone).
+  - CLEAN PER-EDGE DISPOSAL. Each edge a FRESH reader is dispatched; a reader HELD at the
+    signal is freed by dropping the input to 0 first, then it rolls into the east depot and
+    is sold, and the lane is drained, so it never jams the next edge.
+  - SHORT READOUTS. Every company-name readout is short and fixed width ("CG build",
+    "CG clkOK", "e3 i0 x51 o1", "CG 100101"), never a growing string, so SetName never
+    silently no-ops past the ~31-char limit.
+
+Input schedule (input PRESENT during each edge's sample window): 0 1 1 0 1 0.
+Expected output NOT(in), MSB = edge 0: 1 0 0 1 0 1.
+
+VERIFIED (raw reader positions, GS dispatching but the bit is reader_x > GSIGX=46):
+  e0 i0 x51 o1   e1 i1 x45 o0   e2 i1 x45 o0
+  e3 i0 x51 o1   e4 i1 x45 o0   e5 i0 x51 o1
+giving the consolidated readout "CG 100101" == NOT(010010). x51 (>46) = reader passed = 1,
+x45 (<=46) = reader held at the signal = 0. Every bit is the RAW reader x, never the
+schedule. Reproduced reliably across 5 back-to-back fresh dedicated-server runs (see the
+run report). The remaining hardware-interlock work (a clock-driven signal physically
+releasing the reader with zero GS in the loop, and a physical output register) is the
+syncgate line of work, still open; see ../../STUCK.md.
 
 Honest scope
 ------------
