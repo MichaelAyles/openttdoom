@@ -27,8 +27,14 @@ Total test count: 80 passing (`python -m pytest -q`).
   linearly with the tick count, ticks=1 takes about 0.9s (startup) and ticks=100000 takes
   about 17.6s, near 6000 ticks per second. OpenTTD aborts at startup if no base set is
   found, so OpenGFX is confirmed in use.
-- Deviation: we use the prebuilt binary, not a CMake source build, because this environment
-  has no C or C++ compiler. The source-build steps are a comment in `scripts/setup.sh`.
+- Note on the binary: M0 used the prebuilt binary for convenience, but a source build IS
+  possible here and is now verified. The box has MSVC 2022 (Visual Studio Community, cl.exe
+  19.43, C++20); it was just not on the Git-Bash PATH, it loads via `vcvars64.bat`. OpenTTD
+  15.3 was built from source (MSVC + vcpkg + CMake, with `CMAKE_POLICY_VERSION_MINIMUM=3.5`
+  kept via `VCPKG_KEEP_ENV_VARS` so the old `lzo` dep configures under CMake 4.0), and the
+  self-built binary passes the same M0 headless timing test. The earlier "no compiler" claim
+  was a false negative from a PATH-only check. This unblocks the speed fork (see roadmap).
+  Build steps are in `scripts/setup.sh`.
 
 ### M1, workload renders in the golden model. DONE, verified.
 

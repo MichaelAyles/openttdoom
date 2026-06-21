@@ -87,10 +87,11 @@ candidates are both XO-CHIP and do not map onto the 1-bit 64x32 signal display:
 Both need extended XO-CHIP opcodes the golden interpreter does not implement
 (`F000 NNNN` long load I, `FN01` plane select, `00DN/00FB/00FC` scroll, `00FF`
 hires), 128x64 hires, and color planes. Retargeting Chipenstein to monochrome
-64x32 would mean rewriting it in Octo and reassembling, but there is no Octo or
-c-octo assembler in this environment and no C compiler to build one. So the
-tractable, honest path was to write a small raycaster from scratch with the tiny
-`asm.py` assembler, which is what was done.
+64x32 would mean rewriting it in Octo and reassembling, and no Octo or c-octo
+assembler was installed in this environment at the time. So the tractable, honest
+path was to write a small raycaster from scratch with the tiny `asm.py` assembler,
+which is what was done. (Note: the box does in fact have a C/C++ compiler, MSVC 2022,
+so c-octo could be built later if a richer XO-CHIP path is wanted, see STUCK.md.)
 
 This is a deliberate, documented choice (option b of the brief's two paths):
 extending the interpreter with unverified XO-CHIP opcodes purely to run a color

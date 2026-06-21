@@ -236,11 +236,23 @@ rather than `abc -liberty synth/nor.lib`. Same buildable result. `synth/nor.lib`
 yosys builds where the liberty path works. The tool-free Python `to_nor()` remains the default
 so the core pipeline needs no external tools.
 
-## 6. An OpenTTD source build is not done here (no C/C++ compiler).
+## 6. Compiler and OpenTTD-from-source. RESOLVED (was a false negative).
 
-A recorded environment fact, not a blocker. This machine has no C or C++ compiler, so OpenTTD was
-not built from source; we use the prebuilt binary, which satisfies M0 (headless start with
-OpenGFX). yosys and verilator ARE now available (oss-cad-suite, see blocker 5), so the only piece
-of the brief's toolchain that needs a compiler is a from-source OpenTTD build, and that is only
-needed for the speed fork, which is explicitly out of scope. `scripts/setup.sh` documents the
-CMake source-build steps for a human who wants them.
+This was recorded as "no C/C++ compiler", which turned out to be WRONG: it came from checking
+only the Git-Bash PATH for gcc/clang/make. The box actually has Visual Studio 2022 (Community +
+Build Tools) with MSVC `cl.exe` 19.43 (C++20) plus the Windows SDK, vcpkg (bundled with VS),
+CMake 4.0 and Ninja. MSVC is not on the MINGW PATH because it loads via `vcvars64.bat`.
+
+OpenTTD 15.3 was then BUILT FROM SOURCE here and verified: clone the 15.3 tag, configure with the
+VS 2022 generator and the bundled vcpkg toolchain (triplet x64-windows-static), build Release. One
+snag, now solved: CMake 4.0 rejects `cmake_minimum_required` below 3.5, which the old `lzo`
+dependency uses, so set `CMAKE_POLICY_VERSION_MINIMUM=3.5` AND list it in `VCPKG_KEEP_ENV_VARS` so
+vcpkg keeps it through its sanitized per-port build environment. The self-built `openttd.exe`
+(revision 15.3) passes the same M0 headless timing test as the prebuilt one (run it from a complete
+data layout: the exe needs `lang/`, `baseset/`, `ai/`, `game/` alongside it, or use
+`cmake --install`). Build steps are in `scripts/setup.sh`; the build tree lives outside the repo at
+`C:/Users/mikea/openttd-build`.
+
+Consequence: the OpenTTD speed fork (stripped tick loop, uncapped speed) is NO LONGER environment
+-blocked. It is still real work (modify the engine source, rebuild), but the toolchain to do it is
+present and proven.

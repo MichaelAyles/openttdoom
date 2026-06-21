@@ -29,8 +29,8 @@ OPENGFX_TAR="${BASESET}/opengfx-8.0.tar"
 mkdir -p "${VENDOR}"
 
 # --- OpenTTD 15.3 prebuilt win64 binary ------------------------------------------
-# We use the prebuilt binary because this environment has no C++ compiler. See the
-# "build from source" note at the bottom for the CMake alternative a human can use.
+# M0 uses the prebuilt binary for convenience and speed. A from-source MSVC build also
+# works on this box and is verified, see the "build from source" note at the bottom.
 if [ -d "${OPENTTD_DIR}" ] && [ -f "${OPENTTD_DIR}/openttd.exe" ]; then
   echo "[setup] OpenTTD already present at ${OPENTTD_DIR}, skipping download."
 else
@@ -91,14 +91,26 @@ echo "  run the headless smoke test with: bash scripts/run_headless.sh"
 # dir and add the suite's lib/ to PATH for the bundled DLLs (yosys_synth.prepare_env does this).
 # On Linux/macOS, grab the matching oss-cad-suite bundle and put its bin/ on PATH.
 
-# --- OPTIONAL: build OpenTTD from source with CMake ------------------------------
-# We did NOT do this here because there is no C/C++ compiler in this environment.
-# For reference, the source build a human would run is roughly:
+# --- OPTIONAL: build OpenTTD from source with MSVC (VERIFIED on this box) ---------
+# M0 uses the prebuilt binary for convenience, but OpenTTD 15.3 also builds from source
+# here. The box has Visual Studio 2022 (MSVC cl.exe 19.43, C++20), the Windows SDK, vcpkg
+# (bundled with VS), CMake and Ninja. MSVC is not on the Git-Bash PATH, it loads via
+# vcvars64.bat. The verified recipe (run from a Windows cmd, not Git-Bash):
 #
-#   git clone https://github.com/OpenTTD/OpenTTD vendor/openttd/src
-#   cd vendor/openttd/src
-#   cmake -B build -DCMAKE_BUILD_TYPE=Release
-#   cmake --build build -j
+#   call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+#   REM CMake 4.0 rejects cmake_minimum_required < 3.5 (old dep lzo); relax it and have
+#   REM vcpkg keep the var through its sanitized per-port build environment:
+#   set CMAKE_POLICY_VERSION_MINIMUM=3.5
+#   set VCPKG_KEEP_ENV_VARS=CMAKE_POLICY_VERSION_MINIMUM
+#   git clone --depth 1 --branch 15.3 https://github.com/OpenTTD/OpenTTD
+#   cd OpenTTD
+#   cmake -B build -G "Visual Studio 17 2022" -A x64 ^
+#     -DCMAKE_TOOLCHAIN_FILE="C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg\scripts\buildsystems\vcpkg.cmake" ^
+#     -DVCPKG_TARGET_TRIPLET=x64-windows-static -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+#   cmake --build build --config Release -j 4
+#   REM -> build\Release\openttd.exe (revision 15.3).
 #
-# This needs a C++20 compiler plus OpenTTD's dependencies (see its README). The
-# resulting binary is a drop-in replacement for the prebuilt one used above.
+# To RUN the self-built exe it needs the runtime data alongside it (lang\, baseset\, ai\,
+# game\): either run "cmake --install build --prefix <dir>" for a complete layout, or copy
+# the exe into a dir that already has those (e.g. the prebuilt baseset). The self-built
+# binary passes the same M0 headless timing test. This is what unblocks the speed fork.

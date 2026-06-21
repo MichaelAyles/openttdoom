@@ -242,8 +242,10 @@ Documented so the path is clear, not attempted this run:
 - The **clock train** and the full register latency, then the **full CHIP-8 / XO-CHIP
   datapath** in HDL beyond the ALU.
 - Running the **raycaster on the train-built machine** (it is a golden-model workload for now).
-- The **OpenTTD engine fork for speed** (stripped tick loop, uncapped speed), which needs a
-  C or C++ compiler this environment does not have.
+- The **OpenTTD engine fork for speed** (stripped tick loop, uncapped speed). This is now
+  buildable here: OpenTTD 15.3 was compiled from source with the box's MSVC 2022 + vcpkg + CMake
+  and the self-built binary runs (see STATUS.md / STUCK.md). The fork itself (engine source
+  changes) is still to do, but the toolchain is present, not a blocker.
 - **Trains-as-pixels** display, instead of signals as pixels.
 - **Colour, grayscale and Bayer dithering**; the framebuffer is 1-bit this run.
 - Rendering actual **DOOM frames** (DOOM is the look and palette reference only).
