@@ -1,0 +1,86 @@
+diff --git a/src/landscape.cpp b/src/landscape.cpp
+index 8c5cf4b..ae75d75 100644
+--- a/src/landscape.cpp
++++ b/src/landscape.cpp
+@@ -1714,15 +1714,23 @@ void OnTick_Industry();
+ void OnTick_Companies();
+ void OnTick_LinkGraph();
+ 
++/* openttdoom speed fork flag, defined in openttd.cpp. */
++extern bool _ottdoom_logic_map;
++
+ void CallLandscapeTick()
+ {
+ 	{
+ 		PerformanceAccumulator framerate(PFE_GL_LANDSCAPE);
+ 
+-		OnTick_Town();
+-		OnTick_Trees();
+-		OnTick_Station();
+-		OnTick_Industry();
++		/* openttdoom: Town/Station/Industry iterate entities a logic map has none of,
++		 * and Trees plants random trees on the map. All useless and safe to skip when
++		 * there are no towns, industries, stations or cargo. */
++		if (!_ottdoom_logic_map) {
++			OnTick_Town();
++			OnTick_Trees();
++			OnTick_Station();
++			OnTick_Industry();
++		}
+ 	}
+ 
+ 	OnTick_Companies();
+diff --git a/src/openttd.cpp b/src/openttd.cpp
+index 7d585b0..3cbcd75 100644
+--- a/src/openttd.cpp
++++ b/src/openttd.cpp
+@@ -95,6 +95,25 @@
+ 
+ #include "safeguards.h"
+ 
++/*
++ * openttdoom speed fork: strip per-tick work that is useless on a pure-logic map
++ * (trains + signals only, no towns/industries/economy/cargo). Controlled by the
++ * environment variable OTTDOOM_LOGIC_MAP=1 so one binary can run both modes and
++ * the timing comparison is apples-to-apples. Default (unset) is exact stock
++ * behaviour. See docs/speed_fork.md in the openttdoom repo.
++ *
++ * What is gated (all justified safe for a logic map, see the doc):
++ *   - RunTileLoop(): cosmetic ground work only (grass/snow/desert/fences/ambient
++ *     sound/water). It never touches rail track bits, signal state or train motion,
++ *     which read the map arrays directly. On the default 256x256 map this is 256
++ *     tile_loop_proc calls every tick; on the adder's 1024x256 map it is 1024.
++ *   - CallLandscapeTick()'s OnTick_Town/Trees/Station/Industry: iterate those
++ *     entities, of which a logic map has none, and OnTick_Trees plants random trees.
++ *     OnTick_Companies/OnTick_LinkGraph are kept (cheap, and harmless).
++ * The TRAIN vehicle tick and all signal/pathfinding stay fully intact.
++ */
++bool _ottdoom_logic_map = false;
++
+ void CallLandscapeTick();
+ void DoPaletteAnimations();
+ void MusicLoop();
+@@ -502,6 +521,12 @@ int openttd_main(std::span<std::string_view> arguments)
+ 	_game_session_stats.start_time = std::chrono::steady_clock::now();
+ 	_game_session_stats.savegame_size = std::nullopt;
+ 
++	/* openttdoom speed fork: enable the logic-map tick strips if OTTDOOM_LOGIC_MAP=1.
++	 * Unset or "0" gives exact stock behaviour. */
++	if (const char *env = std::getenv("OTTDOOM_LOGIC_MAP"); env != nullptr && env[0] == '1') {
++		_ottdoom_logic_map = true;
++	}
++
+ 	std::string musicdriver;
+ 	std::string sounddriver;
+ 	std::string videodriver;
+@@ -1263,7 +1288,9 @@ void StateGameLoop()
+ 		}
+ 		TimerManager<TimerGameEconomy>::Elapsed(1);
+ 		TimerManager<TimerGameTick>::Elapsed(1);
+-		RunTileLoop();
++		/* openttdoom: the tile loop only does cosmetic ground work (grass/snow/
++		 * fences/ambient sound/water); it is pure waste on a logic-only map. */
++		if (!_ottdoom_logic_map) RunTileLoop();
+ 		CallVehicleTicks();
+ 		CallLandscapeTick();
+ 		BasePersistentStorageArray::SwitchMode(PSM_LEAVE_GAMELOOP);

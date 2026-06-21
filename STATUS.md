@@ -33,8 +33,16 @@ Total test count: 80 passing (`python -m pytest -q`).
   15.3 was built from source (MSVC + vcpkg + CMake, with `CMAKE_POLICY_VERSION_MINIMUM=3.5`
   kept via `VCPKG_KEEP_ENV_VARS` so the old `lzo` dep configures under CMake 4.0), and the
   self-built binary passes the same M0 headless timing test. The earlier "no compiler" claim
-  was a false negative from a PATH-only check. This unblocks the speed fork (see roadmap).
-  Build steps are in `scripts/setup.sh`.
+  was a false negative from a PATH-only check. Build steps are in `scripts/setup.sh`.
+- Speed fork, STARTED and verified. With the source build in hand, a first fork gates the per-tick
+  map housekeeping useless on a logic map (the cosmetic tile loop `RunTileLoop`, and the
+  town/tree/industry/station `OnTick` handlers) behind a runtime flag `OTTDOOM_LOGIC_MAP=1`, keeping
+  `CallVehicleTicks` and all signal/pathfinding intact. Measured ~3x on a bare 256x256 map (about
+  4600 to 14000 ticks/sec), independently re-measured at 3.05x with a control (the flag on a binary
+  WITHOUT the fork code changes nothing, so the speedup is the source strips, not the env var). The
+  fork is `docs/speed_fork.md` plus `docs/speed_fork.patch` (the source lives in the OpenTTD tree
+  outside the repo). Honest scope: the 3x is fixed housekeeping removed on a bare map; it shrinks
+  toward 1x as trains scale, so the per-train pathfinding hot path is the next, deeper lever.
 
 ### M1, workload renders in the golden model. DONE, verified.
 

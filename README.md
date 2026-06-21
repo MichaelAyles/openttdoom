@@ -69,9 +69,13 @@ finish a frame), which is large but no longer a mystery.
    CHIP-8 CPU also needs a register file, instruction decoder, memory, and a display driver, none
    of which are built, then all of it assembled as thousands of computing gates on the map.
 4. **Speed.** Even fully built, computing one CHIP-8 frame at stock OpenTTD speed is impractically
-   slow (a 4-bit adder's carry took about two in-game months in the classic constructions). The
-   OpenTTD speed fork (stripped tick loop, uncapped sim) is what makes a frame watchable. The
-   compiler to build it is now present, but the fork itself is not written.
+   slow (a 4-bit adder's carry took about two in-game months in the classic constructions). A first
+   speed fork now exists and is verified: a runtime flag that strips the per-tick map housekeeping
+   useless on a logic map (the cosmetic tile loop, town/tree/industry/station updates) while keeping
+   the train and signal core, measured at about 3x on a bare map (see `docs/speed_fork.md` and
+   `docs/speed_fork.patch`). That 3x is the fixed housekeeping removed; it shrinks toward 1x as the
+   train count grows, so the deeper lever, pathfinding and per-train hot-path surgery for the fixed
+   reader and clock routes, is the real remaining speed work.
 
 ## The in-game breakthroughs
 
@@ -313,10 +317,11 @@ Documented so the path is clear, not attempted this run:
 - The **clock train** and the full register latency, then the **full CHIP-8 / XO-CHIP
   datapath** in HDL beyond the ALU.
 - Running the **raycaster on the train-built machine** (it is a golden-model workload for now).
-- The **OpenTTD engine fork for speed** (stripped tick loop, uncapped speed). This is now
-  buildable here: OpenTTD 15.3 was compiled from source with the box's MSVC 2022 + vcpkg + CMake
-  and the self-built binary runs (see STATUS.md / STUCK.md). The fork itself (engine source
-  changes) is still to do, but the toolchain is present, not a blocker.
+- The **OpenTTD engine fork for speed** (stripped tick loop, uncapped speed). Started: OpenTTD 15.3
+  builds from source here (MSVC 2022 + vcpkg + CMake), and a first fork gating the per-tick map
+  housekeeping behind a runtime flag gives about 3x on a bare map (`docs/speed_fork.md`,
+  `docs/speed_fork.patch`). The deeper pathfinding/hot-path surgery for the fixed train routes is the
+  remaining speed work.
 - **Trains-as-pixels** display, instead of signals as pixels.
 - **Colour, grayscale and Bayer dithering**; the framebuffer is 1-bit this run.
 - Rendering actual **DOOM frames** (DOOM is the look and palette reference only).
