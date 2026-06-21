@@ -53,7 +53,7 @@ Total test count: 80 passing (`python -m pytest -q`).
   Timendus 5-quirks ROM that would show it is not vendored). vf_reset is covered by the unit
   tests `test_8xy1_or_vf_reset` and `test_8xy2_and_vf_reset_off` instead.
 
-### M2, one working gate plus gate composition. DONE for NOT, 2-input NOR, and a 2-gate OR chain, verified in game. The clock remains.
+### M2, one working gate plus composition, a clock train, and live re-evaluation. DONE and verified in game for NOT, 2-input NOR, a 2-gate OR chain, a clock train, and live same-tile re-evaluation. Full clock-synchronised sampling is not yet reliable.
 
 - `scenarios/GATE_DESIGN.md` is the design and research note: how a clocked NOR is meant to
   be realised from track, signals (block, two-way, entry/exit/combo presignals) and a clock
@@ -125,10 +125,26 @@ Total test count: 80 passing (`python -m pytest -q`).
   loops at the spur), so each of the four cases is built as an INDEPENDENT chain copy at its own
   band of rows, with no teardown. Also confirmed: long company names silently fail to set (a
   length limit), so the readout is kept short.
-  STILL OPEN: the clock train (both readers are still run on demand, not sampled on a shared
-  periodic edge) and the one-edge register latency; the framebuffer readout; and folding the
-  geometry into the place-and-route emitter. The chain now rests on a working, verified
-  composition rather than an unknown.
+- NOW ALSO VERIFIED IN GAME: a clock train and live re-evaluation (`scenarios/clockgate_gs/`).
+  (1) Clock train: a single train circulates a small closed rail loop with a measured, stable,
+  repeating lap period (about 26 to 27 sample-intervals over six laps, the +/-1 is the discrete
+  poll alias), proven from the train's tile positions cycling, not from any GameScript logic
+  (`main_clock.nut`). (2) Live re-evaluation on the SAME tiles: one NOT gate is built once, then
+  with everything still running the input is poked live and the reader re-run, with NO rebuild.
+  Independently re-verified by the orchestrator via the company name: `REEVAL s46 52 45 52` (sig
+  at x=46) means read A input absent reader x=52 (passed, output 1), read B input poked onto the
+  same gate x=45 (held, output 0), read C input removed x=52 (passed, output 1). The same gate's
+  output followed the live input 1,0,1 (`main_reeval.nut`).
+  NOT VERIFIED: full clock-synchronised sampling (`main_sync.nut`). The build agent saw the gate
+  output track a driven input schedule (001100 -> 110011 = NOT per edge) in two runs, but
+  independent re-verification could NOT reproduce it (zero clock-released edges in three tries, the
+  clock train stalled). The release is GameScript-mediated, not a pure track-signal interlock, and
+  there is no physical output register, so this is unreliable and is documented as the remaining
+  hard piece in STUCK.md, not claimed as done.
+  STILL OPEN: tying the verified clock and re-evaluation together into a reliable synchronous gate
+  (a pure clock-driven release interlock and a one-edge output register), the one-edge register
+  latency, the framebuffer readout, and folding the geometry into the place-and-route emitter.
+  The chain and these primitives now rest on working, verified pieces rather than unknowns.
 
 ### M3, toolchain spine. DONE, verified in software.
 

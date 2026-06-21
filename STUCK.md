@@ -7,10 +7,14 @@ The short version: everything that can be proven in software is proven (see STAT
 single hardest piece the brief flagged, a logic gate that actually computes inside OpenTTD, is
 SOLVED and independently verified (a 2-input NOR, truth table 1,0,0,0). Gate COMPOSITION is now
 also verified in game: a two-gate chain computes OR(a,b) = NOT(NOR(a,b)), readout
-`OR s40 39 41 41 41` giving 0,1,1,1 = OR (scenarios/norchain_gs/). What remains is the CLOCK train
-(both chains so far are run on demand, not sampled on a shared periodic edge), the one-edge
-latency, framebuffer readout, and folding the gate geometry into the place-and-route emitter.
-Those are engineering on a working foundation, not unknowns.
+`OR s40 39 41 41 41` giving 0,1,1,1 = OR (scenarios/norchain_gs/). A clock train (a train looping
+with a stable period) and live re-evaluation of a gate on the same tiles (input poked live, output
+follows, no rebuild, readout `REEVAL s46 52 45 52`) are also verified in game
+(scenarios/clockgate_gs/). What remains is tying the clock and re-evaluation together into a
+RELIABLE synchronous gate (a pure clock-driven release interlock plus a one-edge output register;
+the GS-mediated version works intermittently but did not survive independent re-verification), then
+the framebuffer readout and folding the gate geometry into the place-and-route emitter. Those are
+engineering on working, verified pieces, not unknowns.
 
 ## 1. The physical OpenTTD NOR gate geometry. SOLVED for a single combinational gate AND a 2-gate chain.
 
@@ -64,24 +68,50 @@ park the passing reader, so it is parked by freezing it the moment its x reaches
 trains down between cases on the coupled junction hangs the script, so each of the four cases is a
 SEPARATE chain copy at its own band of rows, with no teardown.
 
-STILL OPEN (the rest of the machine), now resting on a verified foundation:
+NOW ALSO RESOLVED: the CLOCK TRAIN and LIVE RE-EVALUATION on the same tiles (scenarios/clockgate_gs/).
+  - Clock train (sub-goal 1, VERIFIED). A single train circulates a small closed rectangular rail
+    loop forever (corner curve pieces are the same constants as the norchain spur), producing a
+    periodic edge. Proven by sampling the train tile (x,y) at fixed wall-clock intervals and
+    streaming the samples into the company name: across six consecutive laps the position swept the
+    loop and recurred with a stable period of ~26 sample-intervals (departure-edge idx 107,133,160,
+    186,213,238; per-lap 26,27,26,27,25; the +/-1 is the discrete-poll alias). See main_clock.nut.
+  - Live re-evaluation on the SAME tiles (sub-goal 2, VERIFIED). One NOT gate (the norgate
+    primitive) is built ONCE and read three times while it stays built, changing only the input:
+    input absent -> reader passes (x=52), poke an input train on the tap (no rebuild) -> reader held
+    (x=45), remove it -> reader passes again (x=52). Readout `REEVAL s46 52 45 52` (sig at 46),
+    reproduced on a fresh run. The output followed the live input on the same physical gate.
+    Two teardown facts found here: a normal one-way block signal blocks the return trip (so a reader
+    cannot ping-pong back through the gate; each read uses a fresh eastbound reader), and a reader
+    HELD at a red signal cannot be sold (SellVehicle needs a depot), so a held reader is freed by
+    removing the input first, then disposed in the east depot. See main_reeval.nut.
+
+STILL OPEN (the rest of the machine), now resting on a further-verified foundation:
+  - Clock-SYNCHRONISED sampling (sub-goal 3, NOT VERIFIED, unreliable). main_sync.nut ties each gate
+    sample to the clock train's passage (the GS waits for the clock to enter the loop top run, then
+    samples). The build agent saw the gate output track a driven input schedule in two of its runs
+    (schedule 001100 -> output 110011 = NOT at each edge, each edge released by a clock wait, never
+    the timeout). BUT independent re-verification could NOT reproduce it: a fresh-run verifier got
+    zero clock-released edges in three tries (the clock train stalled, "clkOK-stuck" twice and
+    "clkSTUCK" once), so the consolidated output never appeared. Treat sub-goal 3 as UNRELIABLE and
+    UNCONFIRMED, not proven. What is missing and why it is fragile: the release is GS-mediated (the
+    GameScript polls the clock and dispatches the reader), there is no pure track-signal interlock (a
+    clock-driven signal physically releasing a waiting reader with no GS in the release path), there
+    is no physical one-edge output register, and the clock loop is not perfectly self-sustaining (its
+    two cycling orders occasionally park the train, and per-edge reader disposal can jam the lane).
+    The clock train and the live re-evaluation below it ARE verified; tying them together reliably is
+    the remaining hard piece.
   - Multi-input NOR with 3+ inputs (the 2-input case is proven; wider fan-in is the same idea,
     all taps in one protected block, but was not built/verified here).
-  - The clock train. The verified gates are combinational (readers are run on demand). The
-    synchronous design needs a clock that releases reader sampling on a shared edge so a chain
-    settles predictably with one edge of latency. NOT built (the 2-gate chain runs the two
-    readers sequentially on demand, not on a shared clock edge).
-  - Teardown / re-running gates in place. The chain sidesteps this by building a fresh copy per
-    case; a clocked machine that re-evaluates the SAME tiles each edge still needs a reliable way
-    to reset reader trains on a coupled junction without the script hanging.
   - Wiring the per-net output train-presence into the framebuffer signal tiles for the viewer.
   - Folding this geometry into `scenarios/openttdoom_gs/main.nut::StampCell` (still a placeholder)
     so the place-and-route pipeline stamps computing cells, not just visible structure.
 
-Concrete next step: add a clock train (a train on a small loop producing a periodic edge) and make
-the readers sample on that shared edge, so a chain settles with one edge of latency (matching
-scenarios/gate_model.py). The single-gate geometry, the observability trick, and now gate
-composition are known and working.
+Concrete next step: replace the GS-mediated clock release in main_sync.nut with a pure track-signal
+interlock (a clock pulse on a shared block that opens a reader's release signal once per lap), add a
+physical output-register block holding the value for a full period, and make the clock train's loop
+self-sustaining so a chain settles with one edge of latency (matching scenarios/gate_model.py). The
+single-gate geometry, the observability trick, gate composition, the clock train, and live same-tile
+re-evaluation are now all known and working.
 
 ## 2. GameScript runtime and observability. MOSTLY RESOLVED, with one caveat.
 
