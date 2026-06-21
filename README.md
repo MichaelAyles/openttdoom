@@ -158,10 +158,20 @@ ALU close through it end to end with the logic preserved at each step.
   company, money or in-game build needed. It can also flatten the map to a plain canvas of
   any size.
 
+![A full-adder as rail track in the OpenTTD world](out_screens/fa1_circuit.png)
+
+*The same circuit in the actual game world (isometric view): a 1-bit full adder laid out as
+real OpenTTD rail track.*
+
 ![Close-up of a full-adder cell on the rail](out_screens/fa1_detail.png)
 
 *A close-up of one full-adder's rail in OpenTTD, cross tiles laid at every route tile so the
 layout reads clearly.*
+
+![The 2-bit adder on the minimap](out_screens/cpu_2bit_minimap.png)
+
+*The 2-bit ripple adder on the minimap: the vertical teeth are the per-net trunk rows, the
+horizontal lines are the routing highways, and the crossings are bridges.*
 
 ## The CHIP-8 ALU and the raycaster
 
@@ -196,6 +206,11 @@ framebuffers.
 ![CHIP-8 IBM logo render](golden/out/ibm.png)
 
 *The CHIP-8 IBM-logo test render, one of the exact-hash golden checks.*
+
+![CHIP-8 corax+ opcode test render](golden/out/corax.png)
+
+*The corax+ opcode test ROM in the interpreter: a checkmark next to every opcode group, a
+visual cross-check of the ALU and control-flow opcodes.*
 
 ## A frame rendered on the OpenTTD map
 
