@@ -84,3 +84,62 @@ index 7d585b0..3cbcd75 100644
  		CallVehicleTicks();
  		CallLandscapeTick();
  		BasePersistentStorageArray::SwitchMode(PSM_LEAVE_GAMELOOP);
+diff --git a/src/train_cmd.cpp b/src/train_cmd.cpp
+index 91a1111..27d0653 100644
+--- a/src/train_cmd.cpp
++++ b/src/train_cmd.cpp
+@@ -43,6 +43,10 @@
+ 
+ #include "safeguards.h"
+ 
++/* openttdoom speed fork flag, defined in openttd.cpp. Gates per-train cosmetic
++ * work (smoke/steam visual effects) that is dead on a headless logic-train map. */
++extern bool _ottdoom_logic_map;
++
+ static Track ChooseTrainTrack(Train *v, TileIndex tile, DiagDirection enterdir, TrackBits tracks, bool force_res, bool *got_reservation, bool mark_stuck);
+ static bool TrainCheckIfLineEnds(Train *v, bool reverse = true);
+ bool TrainController(Train *v, Vehicle *nomove, bool reverse = true); // Also used in vehicle_sl.cpp.
+@@ -3993,7 +3997,10 @@ static bool TrainLocoHandler(Train *v, bool mode)
+ 
+ 	if (CheckTrainStayInDepot(v)) return true;
+ 
+-	if (!mode) v->ShowVisualEffect();
++	/* openttdoom: smoke/steam plumes are purely cosmetic and, worse, each plume
++	 * spawns an EffectVehicle that is then ticked every frame. Skip on a logic
++	 * map. Movement and pathfinding are unaffected. */
++	if (!mode && !_ottdoom_logic_map) v->ShowVisualEffect();
+ 
+ 	/* We had no order but have an order now, do look ahead. */
+ 	if (!valid_order && !v->current_order.IsType(OT_NOTHING)) {
+diff --git a/src/vehicle.cpp b/src/vehicle.cpp
+index 91588a6..6d70c3e 100644
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -65,6 +65,12 @@
+ 
+ #include "safeguards.h"
+ 
++/* openttdoom speed fork flag, defined in openttd.cpp. When set, per-vehicle
++ * post-tick bookkeeping that is dead on a pure-logic train map (cargo aging and
++ * running-sound / motion-counter updates) is skipped in CallVehicleTicks. The
++ * vehicle's own Tick() (movement, signal reservation, pathfinding) is untouched. */
++extern bool _ottdoom_logic_map;
++
+ /* Number of bits in the hash to use from each vehicle coord */
+ static const uint GEN_HASHX_BITS = 6;
+ static const uint GEN_HASHY_BITS = 6;
+@@ -977,6 +983,14 @@ void CallVehicleTicks()
+ 
+ 		assert(Vehicle::Get(vehicle_index) == v);
+ 
++		/* openttdoom: the rest of this loop body is purely cosmetic per-vehicle
++		 * bookkeeping (cargo aging, plus the running-sound and motion-counter
++		 * updates used only for sound/animation). None of it affects movement,
++		 * signal reservation or pathfinding, which all happen inside v->Tick()
++		 * above. On a logic-only train map (engine-only trains, no cargo, no
++		 * economy, null sound) it is pure waste, so skip it. */
++		if (_ottdoom_logic_map) continue;
++
+ 		switch (v->type) {
+ 			default: break;
+ 

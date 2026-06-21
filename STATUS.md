@@ -43,6 +43,16 @@ Total test count: 80 passing (`python -m pytest -q`).
   fork is `docs/speed_fork.md` plus `docs/speed_fork.patch` (the source lives in the OpenTTD tree
   outside the repo). Honest scope: the 3x is fixed housekeeping removed on a bare map; it shrinks
   toward 1x as trains scale, so the per-train pathfinding hot path is the next, deeper lever.
+  DEEPENED (per-train cut): on a deliberately train-heavy map (~150 single-train PBS loops, built by
+  the `benchmarks/loopbench_ai/` NoAI script), the per-train post-tick bookkeeping that is dead weight
+  on a logic train (cargo aging, the sound/motion counter, and smoke/steam effect vehicles) was also
+  gated by the flag. Measured 1.033x (smoke off) to 1.067x (smoke on) on the train-heavy map, 3 runs
+  each. Modest BY DESIGN: the vehicle's own `Tick` (movement, signal reservation, the YAPF path call)
+  was left fully intact, so the remaining per-train floor is the pathfinding, which is the risky lever
+  and was deliberately not touched. Correctness PROVEN, not assumed: 50000 deterministic ticks under
+  the baseline vs cut binary produce exit saves that differ in exactly 4 bytes per train, all the
+  cosmetic `motion_counter`, every movement field byte-identical, and a 500000-tick run exits 0 with no
+  desync. So the cut is faster AND movement-neutral. Full stack vs stock on a cosmetic map: ~1.225x.
 
 ### M1, workload renders in the golden model. DONE, verified.
 

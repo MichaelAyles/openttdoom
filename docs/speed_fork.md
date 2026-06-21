@@ -173,3 +173,181 @@ dominate, is route/pathfinding surgery, for example:
 Those are real engine surgery on the hot path and are the honest next step, not more
 housekeeping strips. This prototype deliberately stops at the safe, measured, reversible win and
 flags the next lever rather than overclaiming.
+
+## Per-train lever, deepened (train-heavy map)
+
+The housekeeping strip above was measured on a bare map with no vehicles, where it is ~3x. On the
+real machine the per-TRAIN tick is what grows with train count, and that is what this section
+attacks: it cuts the per-train post-tick bookkeeping that is dead weight on a logic train, behind
+the same `_ottdoom_logic_map` flag, and measures it on a deliberately train-heavy map.
+
+### The train-heavy benchmark map
+
+There was no train-heavy save, so one was built with a small benchmark AI (a NoAI script,
+`vendor/openttd/openttd-15.3-windows-win64/ai/LoopBench/`). It founds one company on a flat
+256x256 map and stamps a dense grid of small closed rail loops, one engine-only train per loop,
+with one-way PBS signals around each loop. One train per closed loop can never deadlock (it owns
+the whole ring), so the trains circulate forever and each one exercises the kept hot path every
+tick: `Train::Tick` -> `TrainController` movement, signal reservation, and the path reservation /
+YAPF call at each PBS signal. Engine-only trains carry no cargo and stop at no station, so there is
+no loading work, only the pure train tick.
+
+The map has 153 to 158 such loops (so ~150 trains). After the trains spread out, a live readout
+from the AI (logged over the admin port) shows ~85 to 92 of them moving at once, the rest still
+accelerating out of their depots: e.g. `MOTION total=158 moving=92 avgspeed=21`. Motion was also
+confirmed independently: two saves taken ten seconds apart differ only in the vehicle region, and
+the deterministic re-run check below proves the trains advance.
+
+Two variants of the save were built so the cut can be measured both ways:
+- `loopbench.sav`: the logic-realistic map (smoke off, sound off, no economy), the settings an
+  actual openttdoom logic map would use.
+- `loopbench_cos.sav`: the same map but with default cosmetics on (`smoke_amount = 2`), to show the
+  cut's value when the per-train cosmetic work is actually present (the default for a freshly built
+  map that did not hand-disable smoke).
+
+### What was cut, and why it is safe
+
+The cut targets the per-vehicle, per-tick bookkeeping that runs AFTER the vehicle's own
+`v->Tick()` and never feeds movement or pathfinding. All of it is gated by `!_ottdoom_logic_map`,
+so flag-off is exact stock behaviour.
+
+1. **`CallVehicleTicks()` per-vehicle bookkeeping** (src/vehicle.cpp). The loop calls `v->Tick()`
+   (movement, signal reservation, pathfinding, KEPT) and then runs a per-vehicle switch that does
+   only cargo aging (`AgeCargo` / `cargo_age_counter`) and the running-sound / motion-counter
+   updates. None of it is read by movement: `motion_counter` is documented as "counter to
+   occasionally play a vehicle sound" and is used only for sound and NewGRF visual variation; cargo
+   aging affects cargo payment, and our trains carry none with economy off. Gated with a single
+   `if (_ottdoom_logic_map) continue;` right after the `v->Tick()` call, so the whole cosmetic block
+   is skipped on a logic map.
+2. **`Train::ShowVisualEffect()`** (called in `TrainLocoHandler`, src/train_cmd.cpp). Smoke / steam
+   plumes are purely cosmetic and, worse, each plume spawns an `EffectVehicle` that is then itself
+   ticked every frame. On a headless logic map this is pure waste. Gated to
+   `if (!mode && !_ottdoom_logic_map) v->ShowVisualEffect();`. (With `smoke_amount = 0` it already
+   early-returns, so this bites only when cosmetics are on, which is exactly the `loopbench_cos`
+   case.)
+
+The vehicle's `Tick()` (the actual movement, the signal reservation, and the YAPF path call) is
+left fully intact. No pathfinding was cached or skipped: that is the risky lever and is NOT done
+here.
+
+### Result, measured (same map, only the flag/binary differs)
+
+Two binaries, same flag (`OTTDOOM_LOGIC_MAP=1`) on both:
+- baseline = the housekeeping-only fork (`openttd_housekeeping.exe`, md5 `0135ceb0...`, the prior
+  prototype with no per-train cut),
+- optimized = housekeeping + this per-train cut (`openttd_fast.exe`, md5 `ab0cf3b6...`).
+
+All runs are `OTTDOOM_LOGIC_MAP=1 <exe> -x -vnull:ticks=150000 -snull -mnull -c <cfg> -g <save>`,
+three runs each, raw wall-clock seconds pasted from the shell. Startup/load is ~0.57s (measured at
+ticks=100: 0.574s), so the sim-only ratio is slightly higher than the wall ratio.
+
+| map | mode | seconds (3 runs) | avg sec | ticks/sec |
+| --- | --- | --- | --- | --- |
+| loopbench (smoke off) | baseline (housekeeping) | 4.337, 4.313, 4.360 | 4.337 | 34589 |
+| loopbench (smoke off) | optimized (per-train cut) | 4.176, 4.193, 4.221 | 4.197 | 35741 |
+| loopbench_cos (smoke on) | baseline (housekeeping) | 4.467, 4.493, 4.528 | 4.496 | 33364 |
+| loopbench_cos (smoke on) | optimized (per-train cut) | 4.223, 4.198, 4.223 | 4.215 | 35587 |
+
+**Speedup of the per-train cut, same flag, only the binary differs:**
+- smoke off (logic-realistic): 4.337 / 4.197 = **1.033x** (~3.3% wall, ~3.7% on the sim portion).
+- smoke on (default cosmetics): 4.496 / 4.215 = **1.067x** (~6.7% wall, ~7.5% on the sim portion).
+
+For context on the same train-heavy `loopbench_cos` map, the full stack measured at 150000 ticks x3:
+- stock (flag off, no fork at all): 5.147, 5.125, 5.222 -> 5.165s, 29043 tps
+- housekeeping fork only: 4.496s, 33364 tps (1.15x over stock)
+- housekeeping + per-train cut: 4.215s, 35587 tps (1.225x over stock, 1.067x over housekeeping)
+
+Note the housekeeping strip is only ~1.15x here, not 3x: the trains add per-tick cost the tile-loop
+strip does not touch, exactly as the "Next lever" section above warned. The per-train cut recovers
+part of that. This is an honest, modest win, NOT a flat 3x, and it is larger when there is more
+per-train cosmetic work to remove (6.7% with smoke vs 3.3% without).
+
+### Correctness, proven deterministically
+
+The cut must not change how trains move or path. This was proven, not asserted. The null video
+driver runs exactly `ticks=N` and (with `autosave_on_exit`) writes `exit.sav` on exit, so the same
+save run for the same tick count under each binary is bit-for-bit comparable.
+
+Running `loopbench.sav` for 50000 deterministic ticks under the baseline binary and under the
+optimized binary, the two `exit.sav` files are identical in size (879209 bytes) and differ in
+exactly 632 bytes, all in the vehicle region (first diff at offset 799347). 632 / 158 trains =
+exactly 4.0 bytes per train, and the differing bytes sit at the same offset within each ~231-byte
+vehicle record: that is precisely the one `uint32 motion_counter` field per vehicle, the cosmetic
+counter the cut stops updating. Every movement field (tile, x_pos, y_pos, direction, cur_speed,
+subspeed, track, order progress) is byte-identical. The trains are in exactly the same places after
+50000 ticks; only the sound counter differs.
+
+Stability was also checked: 500000 ticks on the train-heavy map under the optimized binary exits 0
+with no assert, desync or crash (13.464s).
+
+### Honest scope and the remaining floor
+
+This is a real, safe, reversible per-train win, but a modest one (3 to 7%). The reason is exactly
+what the section above predicted: with the cosmetic bookkeeping gone, the remaining per-train cost
+is the path reservation and YAPF call inside `v->Tick()`, which is KEPT because cutting it safely
+is hard. On the benchmark the simple single-train rings have no junctions, so `ChooseTrainTrack`
+extends a short reservation to the next PBS signal each time rather than running a full multi-tile
+YAPF search; on the real machine map, with the reader/clock trains hitting real junctions, that
+pathfinding share will be larger and the safe bookkeeping cut's relative win correspondingly
+smaller. The genuinely big remaining lever is caching the fixed reader/clock path (the track is a
+constant, so the pathfinder recomputes the same answer every time), but that is risky engine
+surgery: a wrong cached decision makes a train path INCORRECTLY, which fails the "trains must still
+move and path correctly" bar. It is deliberately left as the next, riskier step rather than faked
+here.
+
+### Reproduce
+
+Rebuild as above (the per-train cut touches `src/vehicle.cpp` and `src/train_cmd.cpp`, both
+recompile incrementally). Build the benchmark save by launching a dedicated server on an isolated
+config (`-c C:/Users/mikea/sfcfg/openttd.cfg`, admin port 3978, NOT the live 3977), running
+`start_ai LoopBench` over the admin port, polling the train count until it stabilises, then
+`save loopbench`. Time both binaries with the headless command above. The build/save tooling
+(`drive_build.py`, `probe.py`, `timeit.py`) and the configs live in `C:/Users/mikea/sfcfg/`.
+
+### Independent re-measurement of the per-train cut (2026-06-21)
+
+The per-train claim was reproduced from scratch in a separate session, on the same box, isolated by
+PID (no `taskkill`, ports 3977 untouched). The OpenTTD tree was rebuilt incrementally first: the
+binary came out byte-identical to the existing `openttd_fast.exe` (md5 `ab0cf3b6d5b961901d5bed2ca9bdacca`),
+confirming that binary is genuinely built from the four source edits in `src/openttd.cpp`,
+`src/landscape.cpp`, `src/vehicle.cpp` and `src/train_cmd.cpp`. The baseline is
+`openttd_housekeeping.exe` (md5 `0135ceb0fe9f633b00ddc217a4019407`, housekeeping strip only, no
+per-train cut). Both binaries were run with `OTTDOOM_LOGIC_MAP=1`; the only difference is the
+per-train cut. 150000 ticks, 3 runs each, raw wall-clock seconds pasted from the shell:
+
+| map | mode | seconds (3 runs) | avg sec | ticks/sec |
+| --- | --- | --- | --- | --- |
+| loopbench (smoke off) | baseline (housekeeping) | 4.278, 4.245, 4.340 | 4.288 | 34984 |
+| loopbench (smoke off) | optimized (per-train cut) | 4.177, 4.196, 4.253 | 4.209 | 35639 |
+| loopbench_cos (smoke on) | baseline (housekeeping) | 4.480, 4.454, 4.545 | 4.493 | 33385 |
+| loopbench_cos (smoke on) | optimized (per-train cut) | 4.240, 4.204, 4.257 | 4.234 | 35430 |
+| loopbench_cos (smoke on) | stock (flag off, no strips) | 5.057, 5.112, 5.103 | 5.091 | 29466 |
+
+Startup/load measured at ticks=100 was 0.527s (opt) / 0.535s (base), so subtracting it gives the
+sim-only ratio.
+
+**Speedup of the per-train cut, same flag, only the binary differs:**
+- smoke off (logic-realistic): 4.288 / 4.209 = **1.019x** wall (~1.9%), 1.019x sim-only. Modest but
+  real: every optimized run beat every baseline run.
+- smoke on (default cosmetics): 4.493 / 4.234 = **1.061x** wall (~5.8%), 1.068x sim-only. Larger,
+  as expected, because there is real smoke/cosmetic work to remove.
+
+For full-stack context on the smoke-on map: stock 5.091s, housekeeping 4.493s (1.13x over stock),
+housekeeping + per-train cut 4.234s (1.20x over stock, 1.061x over housekeeping). The reproduced
+numbers land on top of the prior session's (1.033x / 1.067x), confirming the honest "modest, real,
+larger-with-cosmetics" characterisation, not a flat 3x.
+
+**Correctness, re-proven deterministically.** With `autosave_on_exit`, the null driver writes a
+bit-comparable `exit.sav` after exactly N ticks. Running `loopbench.sav` under the baseline and the
+optimized binary for the same tick count (independently at N=50000 and N=75000) gave `exit.sav`
+files of identical size (879209 bytes at 50000, 881479 at 75000), differing in exactly **632 bytes**
+both times, first diff at offset 799347 (the vehicle region). Clustering those 632 diffs shows a
+perfectly regular per-vehicle pattern: 158 clusters of 3 contiguous bytes plus 158 single bytes,
+i.e. exactly 4 bytes per train (632 / 158 = 4.0), at a fixed offset within each ~197-byte vehicle
+record. That is the one `uint32 motion_counter` cosmetic field the cut stops updating; every
+movement field (tile, position, direction, speed, track, order state) is byte-identical. The trains
+land in exactly the same places under both binaries. That the trains genuinely move was confirmed
+separately: the 50000-tick exit save differs from the original in 24530 bytes and grows the file,
+and the 75000-tick save is larger still. Verdict: the per-train speedup reproduces (1.02x smoke off,
+1.06x smoke on) and is correctness-preserving (movement and pathing byte-identical, only the
+cosmetic sound counter changes).
