@@ -14,12 +14,24 @@ which gives the maze router an easy, mostly monotone job.
 
 Footprint
 ---------
-CELL_W x CELL_H is a placeholder stamp for the real M2 gate geometry. The verified M2
-NOR construction has its own physical size (track, signals, a train loop); until that
-geometry is frozen we reserve a 3xH tile block per cell, which is large enough to drop
-pins on distinct boundary tiles and leave the interior for the gate guts. When M2 lands,
-update CELL_W / CELL_H / the pin offsets to match the real stamp and nothing else here
-needs to change.
+CELL_W x CELL_H is the REAL computing-NOR stamp footprint, frozen from the verified
+block-signal NOR (scenarios/norgate_gs, parameterised in scenarios/computecell_gs).
+A cell laid at origin (cell.x, cell.y) builds, in tile-x order from the origin:
+
+    cell.x      west depot (the reader spawns here)
+    cell.x+1    first track tile (BX)
+    cell.x+7    reader signal (SIGX = BX+6), eastbound-permissive (front = SIGX-1)
+    cell.x+8 .. input taps, one per input (a present train on a tap = that input bit 1)
+    SIGX+n+2    terminating signal (keeps the input block a through block)
+    +2          east depot (the reader rests here, x = EASTX, iff it passed = NOR)
+
+The lane runs on row cell.y+1; the feeder depots that park input trains sit on row
+cell.y, just north. So the footprint is CELL_W = 14 wide (origin .. east depot for the
+2-input case) and CELL_H = 3 tall (feeder row, lane row, plus one margin row). The pin
+offsets below put each input pin ON its tap tile and the output pin on the reader-output
+tile, so the placement the router/emitter sees is physically the same tiles the
+GameScript stamps. This is the "swap in the real footprint + pin offsets" the module
+header promised: nothing else in this file changes.
 
 NOR is unbounded fan-in (max_in == -1), so a wide NOR can have more inputs than the
 baseline CELL_H has left-edge tiles. We therefore size each cell's height to its own
@@ -45,17 +57,24 @@ from netlist import Netlist, Cell
 from scenario import PlacedCell, Pin
 
 
-# Placeholder footprint for one buildable cell (NOR / CONST0 / CONST1).
-# 3x3 is the baseline: 3 wide so input pins and the output pin sit on opposite edges, and
-# at least 3 tall so the gate guts have an interior. A cell with more than CELL_H inputs
-# is made taller per _cell_height so every input pin still gets its own tile.
-# This is a PLACEHOLDER for the real M2 gate stamp geometry, see module docstring.
-CELL_W = 3
+# REAL computing-NOR stamp footprint (the verified block-signal NOR, see module docstring
+# and scenarios/computecell_gs). 14 wide: origin (west depot) .. east depot for the
+# 2-input case. 3 tall: feeder-depot row (cell.y), lane row (cell.y+1), one margin row.
+# The taps are laid horizontally along the single lane row, so unlike the old placeholder
+# the footprint does NOT need to grow with fan-in; the verified gate covers 1-2 taps (NOT
+# and NOR2), which is what the toolchain feeds it here.
+CELL_W = 14
 CELL_H = 3
 
-# Extra tile rows kept above/below the input-pin stack on a tall cell, so the gate guts
-# have a margin and the output pin (placed at the vertical middle) does not collide with an
-# input pin. A wide NOR's footprint height is n_inputs + 2 * PIN_MARGIN, floored at CELL_H.
+# Footprint offsets that pin the stamp geometry. The lane is one row below the origin so
+# the feeder depots can sit on the origin row; the first tap is 8 tiles east of the origin
+# (origin=west depot, +1 = BX, +7 = reader signal SIGX, +8 = first tap), matching Geom() in
+# scenarios/computecell_gs/main.nut.
+LANE_DY = 1          # lane row = cell.y + LANE_DY (feeder depots on cell.y)
+FIRST_TAP_DX = 8     # first input tap at cell.x + FIRST_TAP_DX
+
+# Kept for backward compatibility with _cell_height's old margin maths (unused by the real
+# fixed-height footprint, but referenced below).
 PIN_MARGIN = 1
 
 # Baseline spacing between cell columns and rows, in tiles. The gap is routing channel: the
@@ -130,37 +149,54 @@ def logic_levels(netlist: Netlist) -> Dict[str, int]:
 def _cell_height(n_inputs: int) -> int:
     """Footprint height for a cell with n_inputs inputs.
 
-    Tall enough that every input pin gets its own distinct left-edge tile: at least CELL_H,
-    and n_inputs + 2 * PIN_MARGIN for a wide cell (NOR is unbounded fan-in, max_in == -1).
-    The margin keeps a row of guts above and below the pin stack and stops the middle-row
-    output pin from landing on an input row in the small-fan-in case.
+    The real stamp lays its taps along a single horizontal lane row, so the height is fixed
+    at CELL_H (feeder row, lane row, margin) and does not grow with fan-in. The verified gate
+    geometry covers 1-2 taps (NOT, NOR2); the toolchain feeds it cells in that range.
     """
-    return max(CELL_H, n_inputs + 2 * PIN_MARGIN)
+    return CELL_H
+
+
+def _cell_width(n_inputs: int) -> int:
+    """Footprint width for a cell with n_inputs inputs.
+
+    The east depot sits at SIG2X + 2 = (BX+6) + n + 2 + 2 = origin + 11 + n. So a 1-input
+    NOT is 13 wide and a 2-input NOR2 is 14 wide. We return the per-cell width; CELL_W (14)
+    is the 2-input baseline used for the column stride so cells in a column never overlap.
+    """
+    n = max(1, n_inputs)
+    return 12 + n
 
 
 def _input_pin_offsets(n: int, h: int) -> List[tuple]:
-    """Tile offsets (dx, dy) on the left edge for n input pins, top to bottom.
+    """Tile offsets (dx, dy) for n input pins: the cell's WEST-edge lane tiles.
 
-    One pin per tile down the left column, so every input net occupies a DISTINCT tile and
-    no two nets ever share a tile (which the substrate would read as a short). `h` is the
-    cell's footprint height from _cell_height, which is sized so n pins always fit.
+    The physical input taps run east along the lane row (cell.y + LANE_DY) starting
+    FIRST_TAP_DX east of the origin (the GameScript derives them from cell.x; see Geom() in
+    scenarios/computecell_gs). A routed net delivering this cell's input bit cannot land in
+    the cell interior without the channel router's stub cutting the cell, so the ROUTING pin
+    is the WEST EDGE of the lane: a net drops its carrier train on the west edge and the lane
+    carries it east into the tap block (the taps and the west approach share one signal block,
+    so a train anywhere in that block reads as that input present). One pin per row down the
+    short west edge so two input nets never share the entry tile. For the verified 1-2 input
+    gates this is rows LANE_DY and LANE_DY+0/1; n stays small (NOT, NOR2).
     """
     if n <= 0:
         return []
     if n == 1:
-        return [(0, h // 2)]
-    # Centre the pin stack vertically within the footprint, one pin per row.
-    top = (h - n) // 2
-    return [(0, top + i) for i in range(n)]
+        return [(0, LANE_DY)]
+    # Two inputs: stack the two west-edge entry tiles on adjacent lane-side rows so each input
+    # net has its own distinct entry tile (no short), both feeding the lane that runs east.
+    return [(0, LANE_DY + i) for i in range(n)]
 
 
-def _output_pin_offset(h: int) -> tuple:
-    """Tile offset (dx, dy) for the single output pin on the right edge, middle row.
+def _output_pin_offset(h: int, n: int = 2) -> tuple:
+    """Tile offset (dx, dy) for the single output pin: the reader-output tile (east depot).
 
-    The output sits on the opposite (right) edge from the inputs, so it can never share a
-    tile with an input pin regardless of height.
+    The reader rests in the east depot (x = EASTX = origin + 11 + n) iff the gate output is
+    1, so that tile is where a downstream cell reads this cell's output bit. It sits on the
+    lane row, on the opposite (east) end from the input taps, so it never collides with one.
     """
-    return (CELL_W - 1, h // 2)
+    return (11 + max(1, n), LANE_DY)
 
 
 def _channel_demand(netlist: Netlist, levels: Dict[str, int]) -> int:
@@ -260,19 +296,21 @@ def place_cells(netlist: Netlist) -> Placement:
 
         cy = TOP_MARGIN
         for row, c in enumerate(ordered):
-            ch = _cell_height(len(c.inputs))
+            n_in = len(c.inputs)
+            ch = _cell_height(n_in)
+            cw = _cell_width(n_in)
             cell_row[c.id] = row
             in_pins = []
-            for (dx, dy), net in zip(_input_pin_offsets(len(c.inputs), ch), c.inputs):
+            for (dx, dy), net in zip(_input_pin_offsets(n_in, ch), c.inputs):
                 in_pins.append(Pin(net=net, x=cx + dx, y=cy + dy))
-            odx, ody = _output_pin_offset(ch)
+            odx, ody = _output_pin_offset(ch, n_in)
             out_pin = Pin(net=c.output, x=cx + odx, y=cy + ody)
             pc = PlacedCell(
-                id=c.id, type=c.type, x=cx, y=cy, w=CELL_W, h=ch,
+                id=c.id, type=c.type, x=cx, y=cy, w=cw, h=ch,
                 inputs=in_pins, output=out_pin)
             placed.append(pc)
             by_id[c.id] = pc
-            max_x = max(max_x, cx + CELL_W)
+            max_x = max(max_x, cx + cw)
             max_y = max(max_y, cy + ch)
             # Advance the cursor past this cell's footprint plus the routing row gap, so the
             # next cell in this column never overlaps a tall cell above it.
