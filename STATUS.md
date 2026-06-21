@@ -145,6 +145,19 @@ Total test count: 80 passing (`python -m pytest -q`).
   (a pure clock-driven release interlock and a one-edge output register), the one-edge register
   latency, the framebuffer readout, and folding the geometry into the place-and-route emitter.
   The chain and these primitives now rest on working, verified pieces rather than unknowns.
+- ATTEMPTED, NOT ACHIEVED: a PURE track-signal clock interlock (`scenarios/syncgate_gs/`). A
+  follow-on run tried to replace the GameScript-mediated clock release with a real interlock (the
+  clock train's block occupancy physically releasing the reader, plus an output register). It did
+  not close, and the blocker is now precisely characterised: in OpenTTD 15.3, reading the clock
+  block's occupancy by signals couples the RESERVATION graph, so a circulating reader makes the
+  clock's loop tile unreservable and the clock stalls. Three different read mechanisms (block-merge,
+  presignals, PBS) all failed the same way. A more-reliable self-sustaining clock (one-way block
+  signals round the loop) came out of it, with a stable steady-state period, though its launch is
+  still flaky (independent verification: 3 of 5 fresh runs, the two failures at launch). The output
+  register was not built (it depends on the interlock). The exact blocker and three untried
+  workarounds (clock block off the mandatory loop path, multiple clock trains, a strictly
+  one-directional detector) are in STUCK.md for the human. This is an honest negative result: the
+  pure interlock is a real OpenTTD reservation-coupling obstacle, not a tuning miss.
 
 ### M3, toolchain spine. DONE, verified in software.
 

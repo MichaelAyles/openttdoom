@@ -113,6 +113,55 @@ self-sustaining so a chain settles with one edge of latency (matching scenarios/
 single-gate geometry, the observability trick, gate composition, the clock train, and live same-tile
 re-evaluation are now all known and working.
 
+### Update (scenarios/syncgate_gs/): a more-reliable clock (but flaky on launch); the pure interlock is the precise blocker.
+
+A follow-on de-risk (scenarios/syncgate_gs/) attacked exactly the "concrete next step" above. Two
+things were settled, both judged from RAW positions read via the company name, GS observing only.
+
+PARTLY RESOLVED: a SELF-SUSTAINING CLOCK that, once running, locks to a stable period. The design is
+ONE-WAY NORMAL block signals around the loop (one per side, clockwise), not a plain unsignalled loop
+with plain-tile waypoint orders. A single train on a one-way-block-signalled loop reserves block-by-
+block forward, cannot mutually deadlock (it is the only train), and never re-enters the depot (a one-
+way signal's back is solid). When it launches it circulates many laps with the period locked at 35-36
+sample-intervals (15 ticks each, so ~525 ticks), one run reaching 17 laps. HONEST RELIABILITY CAVEAT:
+the build agent reported 3/3, but independent re-verification got only 3 of 5 fresh runs. The two
+failures were both at LAUNCH, not steady state: once the clock train left the depot it always locked
+to the stable period, but in run 2 it stalled oscillating at the depot exit (never left) and in run 4
+the vehicle never built at all ("NOVEH"). So the clock CONCEPT and steady-state period are solid, but
+the launch sequence (build vehicle, leave depot onto the signalled loop) is itself flaky and is an
+open reliability item. Also pinned: the earlier "clock stalls at ~lap 5" symptom was NOT the clock, it
+was the COMPANY-NAME LENGTH LIMIT (~31 chars): a growing readout string overflowed, SetName silently
+no-opped, and the DISPLAYED name froze while the script and train ran on. Bounded short name == fix.
+(Second gotcha: only ONE admin connection at a time; a concurrent rcon resets a held poller's socket.)
+
+STILL BLOCKED, with the precise mechanism now pinned: the PURE RELEASE INTERLOCK. To release the
+reader by clock-block occupancy with no GS in the timing path, the reader's release signal must READ
+the clock block's occupancy, which requires connecting the reader's signal network to the clock
+block. In OpenTTD 15.3 that connection couples the RESERVATION graph too, so a circulating reader
+makes the clock's mandatory loop tile (the clock block, on its bottom run) unreservable and the clock
+either never leaves its depot or stalls on the clock block (observed: cL=0 the whole run, reader
+free-running). THREE distinct read mechanisms were built and all failed this way:
+  - STAGE 2, block-merge read (a stub crossing merges the clock-block tile into the reader's release
+    block): SYMMETRIC, so the reader holds the clock. Clock could not launch (stuck in depot, cL=0).
+  - STAGE 3, presignal read (reader release = ENTRY presignal; an EXIT presignal at the stub top
+    faces the clock block, so entry-green iff clock-block-clear, intended to read the aspect WITHOUT
+    merging reservation): in 15.3 it still coupled. Clock could not launch (cL=0).
+  - STAGE 4, PBS clock + block-merge read (one-way PBS path signals on the clock loop, so the clock
+    reserves track-by-track): the clock DID leave the depot and reach the clock block, then STALLED
+    ON the clock block (could not reserve out while the reader circulated through the merged region),
+    and the merge did not hold the reader, which free-ran past the release (cL=0, P rising). Coupling
+    relocated from the depot to the clock block, not removed.
+This is exactly the risk all three research proposals flagged: "the shared clock block must be
+read-only to readers, or the clock can be metered to a halt." A pure-signal occupancy read that does
+NOT couple reservation was not found in 15.3 here. Concrete next directions for the human, none built:
+  (a) take the clock block OFF the clock's mandatory path, e.g. the clock drives onto a short reverse
+      SPUR (the clock block) and backs out, so a coupled reader cannot block the main loop;
+  (b) two (or more) clock trains so the loop is never fully blockable by one coupled reader;
+  (c) a genuinely one-directional detector (verify whether a two-way exit-signal back-face read can be
+      arranged so reservation flows only clock->reader, never reader->clock).
+The reliable clock and the verified single-gate read are the working foundation to build these on.
+Files: scenarios/syncgate_gs/ (main.nut STAGE 1/2/3, readme.txt, poll.py, run2.sh, rel3.sh).
+
 ## 2. GameScript runtime and observability. MOSTLY RESOLVED, with one caveat.
 
 The GS runtime IS available and was used extensively. A dedicated server (`openttd.exe -D`)

@@ -30,3 +30,6 @@ tmp_*.json
 # generated verilog (emitted from amaranth by yosys_synth.py)
 synth/adder4.v
 synth/alu8.v
+
+# stray MCP tool artifacts
+.playwright-mcp/
