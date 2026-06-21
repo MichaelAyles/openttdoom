@@ -179,6 +179,18 @@ Total test count: 80 passing (`python -m pytest -q`).
   workarounds (clock block off the mandatory loop path, multiple clock trains, a strictly
   one-directional detector) are in STUCK.md for the human. This is an honest negative result: the
   pure interlock is a real OpenTTD reservation-coupling obstacle, not a tuning miss.
+- KEYSTONE, the toolchain EMITS a computing cell (SC1, `scenarios/computecell_gs/`,
+  `tools/run_sc1.py`). A one-cell NOR2 netlist runs through the real place_and_route (place + emit),
+  and the GameScript stamps the verified computing-NOR geometry AT THE PLACED position: every gate
+  tile is `cell.x`/`cell.y` plus a fixed footprint offset, no hand-coded map coordinate (`place.py`
+  footprint frozen to CELL_W=14, CELL_H=3). It computes: readout `SC1 s19 24 18 12 12` gives 1,0,0,0
+  = NOR, judged externally from the raw reader positions (x > SIGX), never from the inputs in
+  Squirrel. Verified: the orchestrator got 4/4 identical fresh runs, the build agent 5/5, an
+  adversarial verifier 4/5 (one run a polling-timing flake, not a logic fault), and the source was
+  audited to confirm emitted-from-placement. This is the first time the pipeline produces WORKING
+  hardware in OpenTTD, not just visible structure. STILL OPEN (SC2): wiring two emitted cells
+  together. A 2-cell OR=NOT(NOR) stamps and gate1 computes in-chain, but the inter-cell bit transfer
+  across the routing gap does not reliably merge the two signal blocks (see STUCK.md).
 
 ### M3, toolchain spine. DONE, verified in software.
 

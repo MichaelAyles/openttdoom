@@ -26,7 +26,7 @@ the map as tiles (see the frame images below). The real goal is the hard one, a 
 that:
 
 ```
-Machine-computed DOOM frame:  [######------------------------]  ~20%
+Machine-computed DOOM frame:  [#######-----------------------]  ~23%
 ```
 
 That number is deliberately honest: every research UNKNOWN is now retired (a gate computes,
@@ -53,9 +53,22 @@ finish a frame), which is large but no longer a mystery.
 - **A reliable clock-synchronised NOT gate**: output NOT(0,1,1,0,1,0) = 1,0,0,1,0,1, reproduced
   8 of 8 independent fresh runs.
 - **OpenTTD builds from source on this box** (MSVC 2022 + vcpkg + CMake), so the speed fork is no
-  longer environment-blocked.
+  longer environment-blocked, and a first fork already gives about 3x on a bare map.
+- **The toolchain emits a cell that COMPUTES**: a NOR2 netlist goes through place-and-route and
+  the GameScript stamps the verified computing geometry at the placed position (not hand-coded),
+  and it computes 1,0,0,0 = NOR in OpenTTD, reproduced across fresh runs. This is the first time
+  the pipeline produces working hardware, not just a picture of it.
 
 ### Key blockers to a machine-computed DOOM frame
+
+1. **No self-contained clock yet.** The clocked gate works but the per-edge release is
+   GameScript-mediated. A pure track-signal interlock failed on an OpenTTD reservation-coupling
+   (reading the clock block's occupancy stalls the clock), and there is no physical output
+   register. A real machine needs a self-sustaining clock and a one-edge latch.
+2. **Multi-cell wiring.** A single emitted cell now computes (the emitter stamps the real geometry,
+   not placeholder track), but a 2-cell circuit does not yet: carrying a bit from one cell's output
+   across the routing gap into the next cell's input block does not reliably merge the signal blocks
+   in OpenTTD. Wiring emitted cells together is the immediate next hard piece.
 
 1. **No self-contained clock yet.** The clocked gate works but the per-edge release is
    GameScript-mediated. A pure track-signal interlock failed on an OpenTTD reservation-coupling

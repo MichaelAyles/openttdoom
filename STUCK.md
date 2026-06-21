@@ -109,8 +109,20 @@ STILL OPEN (the rest of the machine), now resting on a further-verified foundati
   - Multi-input NOR with 3+ inputs (the 2-input case is proven; wider fan-in is the same idea,
     all taps in one protected block, but was not built/verified here).
   - Wiring the per-net output train-presence into the framebuffer signal tiles for the viewer.
-  - Folding this geometry into `scenarios/openttdoom_gs/main.nut::StampCell` (still a placeholder)
-    so the place-and-route pipeline stamps computing cells, not just visible structure.
+  - Folding this geometry into the emitter: DONE for ONE cell (SC1). `scenarios/computecell_gs/` plus
+    the CELL_W=14/CELL_H=3 footprint in `place.py` make place-and-route stamp a real computing NOR
+    cell at the placed position (verified, readout `SC1 s19 24 18 12 12` = 1,0,0,0 = NOR, the
+    geometry derived from cell.x/cell.y, not hand-coded). What is NOT done is wiring TWO emitted cells
+    together (SC2): a 2-cell OR=NOT(NOR) stamps and gate1 computes in-chain, but the inter-cell bit
+    transfer across the routing gap (gate1 output rests ~17 tiles from gate2's input block) does not
+    reliably merge the two signal blocks in OpenTTD 15.3. This is the multi-tile coupling-geometry
+    class. Fix paths (documented in computecell_gs/readme.txt): reproduce the channel router's actual
+    routed track for the net (a real connected path with bridges at crossings) instead of a hand-laid
+    L-coupling; OR add a placement constraint co-locating a driver's output rest tile with its
+    consumer's input block (the verified norchain only worked because gate2's input overlapped gate1's
+    rest tile via a short pure-vertical spur); OR carry the inter-cell bit on a train CLOCKED across
+    the gap rather than a static block-merge. Wide fan-in (>2 input) computing cells are also unproven
+    in game (the stamp covers NOT and NOR2; the adder's wider NORs route fine but were not stamped).
 
 Concrete next step: replace the GS-mediated clock release in main_sync.nut with a pure track-signal
 interlock (a clock pulse on a shared block that opens a reader's release signal once per lap), add a
