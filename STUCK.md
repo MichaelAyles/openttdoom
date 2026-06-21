@@ -118,10 +118,14 @@ STILL OPEN (the rest of the machine), now resting on a further-verified foundati
     the GS stamps both cells from the placement, and the inter-cell bit transfers PHYSICALLY over track:
     readout `OR s24 23 29 29 29` (g2sigx=24; x>24 => OR 1) = 0,1,1,1 = OR(a,b), judged from the raw
     gate2 reader x. The MECHANISM is verified by both agents (emitted-from-placement, physical coupling,
-    no OR in Squirrel). RELIABILITY is the open caveat: the build agent got 5/5 after hardening, but
-    INDEPENDENT verification got 3/5, the two failures being train-dispatch races (a reader stuck in its
-    depot, an input not parked), not a logic error, and made worse by running two OpenTTD instances at
-    once. A clean no-contention re-verify is pending.
+    no OR in Squirrel). RELIABILITY is the open caveat: the build agent got 5/5 after hardening, an
+    independent verifier 3/5, and a CLEAN orchestrator re-verify with NO contention also got 3/5 (runs
+    1,3,5 = 0,1,1,1; run 2 = 0,0,1,1, case 01's input b did not park; run 4 no readout, a launch stall).
+    So it is NOT a contention artifact: the per-case train choreography (build, park each input, launch
+    each reader, 4 cases x 2 gates) is genuinely only ~3/5 reliable. The mechanism is correct (every
+    clean run is exactly 0,1,1,1); hardening the dispatch to >=4/5 is the open item, on the critical path
+    (an emitted adder is ~10-20 cells, so per-cell choreography must be reliable before any multi-gate
+    circuit can compute end to end).
     The fix was path (A), the placement constraint: the earlier blocker was that the toolchain places
     gate2 ~17 tiles east of gate1, so the inter-cell bit had to cross a long horizontal gap, and a
     hand-laid L-coupling over that gap does NOT merge the two signal blocks in OpenTTD 15.3. norchain

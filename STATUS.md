@@ -221,12 +221,17 @@ Total test count: 80 passing (`python -m pytest -q`).
   MECHANISM is real (both agents confirmed, source-audited: emitted-from-placement, the coupling is
   physical track, the output is read only from raw gate2 reader x, no OR in Squirrel) and that it
   reproduces `OR s24 23 29 29 29` = 0,1,1,1. RELIABILITY is the honest caveat: the build agent got
-  5/5 after hardening, but INDEPENDENT verification got only 3/5, the two failures being train-dispatch
-  races (a reader stuck in its depot; an input train not parked), NOT a logic error, and made more
-  frequent by running two OpenTTD instances at once (the parallel speed fork). A clean re-verification
-  with no CPU contention is pending (to be run once the speed-fork track finishes). So SC2's logic is
-  proven; its dispatch reliability under contention is the open item. Run with `tools/run_or.py`; see
-  scenarios/computecell_gs/ (RunCopyOR/BuildAndLaunch) and readme.txt Stage 2.
+  5/5 after hardening, but INDEPENDENT verification got 3/5, and a CLEAN orchestrator re-verify with no
+  CPU contention (the speed-fork track had finished) ALSO got 3/5: runs 1,3,5 gave `OR s24 23 29 29 29`
+  = 0,1,1,1, run 2 gave `OR s24 23 23 29 29` = 0,0,1,1 (case 01's input b did not park, so gate1 wrongly
+  saw an empty input), run 4 produced no readout (a launch stall). So the earlier "just contention"
+  read was WRONG: the flakiness is a GENUINE per-case train-dispatch fragility (an input train not
+  parking, a reader not launching), not the parallel speed fork. The MECHANISM is correct, every clean
+  run gives exactly 0,1,1,1, but the per-case choreography (build, park each input, launch each reader,
+  across 4 cases x 2 gates) is only ~3/5 reliable. Hardening that dispatch to >=4/5 is the open item and
+  is on the critical path (an emitted adder is ~10-20 cells, so per-cell choreography must be reliable
+  before larger circuits can compute). Run with `tools/run_or.py`; see scenarios/computecell_gs/
+  (RunCopyOR/BuildAndLaunch) and readme.txt Stage 2.
 
 ### M3, toolchain spine. DONE, verified in software.
 
