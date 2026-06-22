@@ -220,6 +220,19 @@ horizontal lines are the routing highways, and the crossings are bridges.*
 
 ## The CHIP-8 ALU and the raycaster
 
+**What "DOOM" means here, and why 8-bit CHIP-8.** There are two different DOOMs. *Real* DOOM
+(id, 1993) needs a 32-bit CPU and about 4 MB of RAM; there is no genuine native 4-, 8-, or
+16-bit port (the "DOOM runs on everything" stunts almost always stream the frame from external
+compute), and the minimal honest native runs are 32-bit microcontrollers like the RP2040. So
+real DOOM on a train computer is firmly roadmap-fantasy, and this repo says so. *Our* DOOM is a
+Wolfenstein-3D-style raycaster running on a CHIP-8 machine, the realistic version of "DOOM on
+trains". CHIP-8 is an 8-bit machine: sixteen 8-bit registers, an 8-bit ALU, 4 KB of memory
+(12-bit addresses), 16-bit instructions. So the datapath width we need is 8-bit, not 4 and not
+16: the 4-bit adder was only the de-risk demo, and 16-bit is overkill. The good news is that the
+8-bit half that matters most is already through the pipeline (the ALU below is literally the
+CHIP-8 instruction set). What is left to make it a CPU is the register file, instruction decoder,
+4 KB memory, stack, timers and the display driver wrapped around that ALU.
+
 **The ALU.** `hdl/alu.py` is the CHIP-8 8XY_ ALU as a real circuit through the whole
 pipeline: it takes two 8-bit registers VX and VY plus a 4-bit op and produces an 8-bit
 result and the VF flag, covering OR, AND, XOR, ADD, SUB, SHR, SUBN, SHL and LD with the
