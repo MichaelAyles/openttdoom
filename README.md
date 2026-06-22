@@ -157,6 +157,32 @@ clocked by a train on a fixed loop.
 The pipeline is verified in software at every stage, and both the 4-bit adder and the 8-bit
 ALU close through it end to end with the logic preserved at each step.
 
+### Relation to a real FPGA/ASIC flow
+
+This is not a loose analogy, the stages line up one to one with a real hardware build. A common
+point of confusion is to call the whole thing "synthesis", but synthesis and place-and-route are
+two distinct stages here just as they are in Vivado, and our directories mirror that split:
+
+| openttdoom stage | Vivado (FPGA) | ASIC flow |
+| --- | --- | --- |
+| `hdl/` (Amaranth) | RTL design entry | RTL |
+| `synth/` (`to_nor()`, yosys techmap) | **Synthesis** (RTL to netlist, map to primitives) | Logic synthesis |
+| `place_and_route/` (placer + channel router) | **Implementation** (`place_design` + `route_design`) | Floorplan / place / route |
+| `scenario.to_nut()` emit | `write_bitstream` | GDSII / tape-out |
+| OpenTTD map (trains + signals) | the configured FPGA fabric | the fabricated silicon |
+
+So `synth/` is the synthesis-run analog and `place_and_route/` is the implementation-run analog,
+they are adjacent stages, not the same one. Two details make the mapping tight: the NOR-only
+"only buildable gate" set is our standard-cell/primitive library (the analog of LUTs and flip-flops),
+so `to_nor()` is technology mapping, exactly what yosys `techmap`/`abc` do (and we run yosys for it);
+and because the OpenTTD surface is essentially single-layer, the router crosses nets with physical
+**bridges** (`Route.bridges`), our analog of the multiple metal layers and vias a real router uses.
+
+Two places the analogy honestly breaks down are exactly where the open problems live: there is no
+clock-tree-synthesis equivalent yet (distributing the train clock is unsolved, the reservation
+-coupling blocker), and there is no static timing analysis (the train-propagation/clock-period
+question is the open synchronous-element problem).
+
 ## The toolchain wins
 
 - **Complete routing via perpendicular bridges.** A 4-bit adder netlist is not planar, so
