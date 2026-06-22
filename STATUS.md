@@ -174,6 +174,29 @@ landed; the M5 work added the 20 CPU tests and left every other test green.)
   guard. Honest scope: this is GS-MEDIATED clock-synchronised sampling (the GS is in the per-edge
   timing path, gated by the clock train's position) and it is combinational NOT sampled per edge
   (output[k] = NOT(input[k]), no register latency).
+  NOW ALSO DEMONSTRATED: a CLOCK-STEPPED FIBONACCI READOUT on the proven clocked mechanism
+  (`scenarios/clockgate_gs/main_fib.nut`, info_fib.nut, readme_fib.txt, run_fib.sh; installed as the
+  `fibgate` GS). A fork of main_clocked.nut: the SAME self-sustaining one-way-block-signalled clock
+  loop and the SAME per-edge WaitClockEdge, but with a BANK of 4 parallel block-signal NOR/NOT gate
+  lanes (one per output bit) gated by each clock edge. At each of 7 clock edges the GS presents a
+  successive Fibonacci term 1,1,2,3,5,8,13 to the bank (lane out = NOT(input present); to make lane i
+  output bit b the GS sets that lane's input present iff b==0), then reads all 4 lanes back and decodes
+  the value from the RAW reader x (out = x > GSIGX), never from the term list in Squirrel. Readout via
+  the SHORT company name: per edge `e<k> v<val> b<bits> p<wait>`, final `F 1 1 2 3 5 8 13`. VERIFIED by
+  running fresh dedicated-server passes: edges 0-4 (values 1,1,2,3,5) read correctly in EVERY pass that
+  launched the clock, and the COMPLETE sequence `F 1 1 2 3 5 8 13` reproduced in multiple fresh passes
+  (batch 3: runs 2,5,6; batch 4: run 4), judged from the raw per-edge positions. HONEST SCOPE: this is
+  per-edge RE-PRESENTATION of the terms on the proven clock (the value is freshly presented and computed
+  by the gates each edge), NOT a self-feeding hardware register Fibonacci (next = a+b held in track and
+  fed back), which needs the physical one-edge OUTPUT REGISTER (the open syncgate item below). RELIABILITY
+  caveat, honest: the clock LAUNCH is the documented flaky step (some fresh-server passes CKFAIL when the
+  single clock train fails to leave its depot), and the per-edge input CHOREOGRAPHY for the high-value
+  terms (8,13, the MSB lane going input-absent) is the same train-dispatch fragility documented for SC2:
+  some passes read `F 1 1 2 3 5 0 5` when the MSB lane's input train does not clear in time. A
+  dispatch-hardening pass (lane-build self-heal, persistent reader egress, ReverseVehicle + verified
+  tap-clear on input removal) reduced but did not fully eliminate these races. Portrait artifacts:
+  the 4-bit adder stamped as real rail (`out_screens/portrait_adder4_mini.png`, `_closeup.png`) and the
+  fibgate layout on the real map (`out_screens/fibgate_layout_closeup.png`: the clock loop + 4 gate lanes).
   STILL OPEN: a PURE track-signal release interlock with no GS in the timing path (blocked by an
   OpenTTD reservation-coupling, see the syncgate attempt below) and a physical one-edge OUTPUT REGISTER
   for true edge-N = f(edge N-1) latency; then the framebuffer readout and folding the geometry into the
