@@ -442,6 +442,288 @@ def render_reference_hi(
     return disp
 
 
+# --- the PURE-INTEGER 1-bit oracle (render_reference_hw) ---------------------
+#
+# render_reference_hi above is gorgeous but reads np.cos/np.sin/np.floor in its
+# per-column march and float multiplies in its per-pixel paint. A NOR netlist
+# cannot reproduce a float bit for bit, so render_reference_hi can never be the
+# hardware FSM's exact target. render_reference_hw is the answer: the SAME look,
+# rebuilt as a PURE-INTEGER, deterministic function so the FSM can match it
+# exactly.
+#
+# The contract:
+#   - the per-column ray cast is the SAME integer fixed-point DDA as the plain
+#     render_reference: _cast_hw is _cast plus an integer wall-fraction readout.
+#     No float, no np.cos/np.sin/np.floor anywhere in the per-column or per-pixel
+#     path. The only float lives in the module-load LUT builders, which on the
+#     train substrate are hardwired landscape (free constant tiles), exactly like
+#     DIRX_MAG/RECIP already are.
+#   - the gorgeous upgrades are all expressed as INTEGER LUT lookups keyed off the
+#     integer hit-step `dist` (1..STEPS) the DDA returns:
+#       * slice height from RECIP[dist] (the plain renderer's own table),
+#       * wall brightness from HW_DIST_SHADE[dist] (step -> shade LUT),
+#       * Bayer 4x4 ordered dither of the wall (threshold compare, integer),
+#       * 1px black edge seams at slice top and bottom,
+#       * black vertical seams at column depth discontinuities (integer |jump| of
+#         the hit-step between neighbouring columns vs a threshold),
+#       * dithered floor and a dark dithered ceiling (row-distance -> shade LUTs),
+#       * an optional integer vertical wall texture LUT keyed off the integer
+#         wall-hit fraction.
+#   - it supports the 64x32 "lo" panel (and a 128x64 "hi" for completeness). It is
+#     a pure function of (heading, px, py, res, texture), pinned by sha256 below.
+#
+# Because every quantity is an integer LUT indexed by an integer, the eventual
+# hardware FSM (a register + NOR datapath that walks the same DDA and the same
+# tables) can reproduce this frame bit for bit. This is the FSM's bit-exact
+# target, the integer sibling of render_reference_hi.
+
+# Step -> wall shade LUT. Index is the integer DDA hit-step `dist` (0..STEPS),
+# value is a wall brightness 0..16 fed to the Bayer compare. Near hits (small
+# step) are bright, far hits dark, the depth cue. Capped at 13 so even near walls
+# keep a visible Bayer texture (the floor is the only fully-bright surface) and
+# floored at 2 so the farthest walls still read as wall, not void. Built once at
+# module load (float here is fine, it is a hardwired constant table); the
+# per-pixel path only ever INDEXES it with the integer step.
+HW_STEP_SHADE_MAX = STEPS + 1
+
+
+def _build_step_shade_lut():
+    lut = [0] * HW_STEP_SHADE_MAX
+    for d in range(HW_STEP_SHADE_MAX):
+        # d is the integer micro-step count to the hit. STEP_SCALE units per step,
+        # SUB units per cell, so cells travelled ~= d * STEP_SCALE / SUB.
+        cells = (d * STEP_SCALE) / SUB
+        shade = 13.0 / (1.0 + cells * 0.85)
+        lut[d] = int(max(2, min(13, round(shade))))
+    return lut
+
+
+HW_STEP_SHADE = _build_step_shade_lut()
+
+# Bayer 4x4 ordered-dither threshold matrix as a plain integer list-of-lists
+# (values 0..15). A target shade s (0..16) lights a pixel where BAYER4_HW[y&3][x&3]
+# < s, so s is a coverage level spread into the classic ordered-dither pattern.
+# Kept independent of the numpy BAYER4 above so this oracle is self-contained and
+# obviously integer.
+BAYER4_HW = [
+    [0, 8, 2, 10],
+    [12, 4, 14, 6],
+    [3, 11, 1, 9],
+    [15, 7, 13, 5],
+]
+
+# Floor / ceiling shade LUTs. Index is the row distance from the horizon (screen
+# centre) in pixels, value is a shade 0..16 for the Bayer compare. Nearest rows
+# (far from the horizon) are brightest; rows near the horizon fade out. The
+# ceiling is dimmer than the floor so the two planes read as different surfaces.
+# Built per call for the requested height (the index range scales with the panel),
+# but the build is integer-from-an-integer-fraction so it is exact and
+# deterministic.
+def _build_plane_shade_lut_int(rows: int, near: int, far: int, gamma_num: int,
+                               gamma_den: int):
+    """A plane shade LUT with `rows` entries, fading from `near` (row 0, closest)
+    to `far` (last row, the horizon). The gamma is a rational gamma_num/gamma_den
+    applied as integer arithmetic on a 0..1024 fixed-point t, so no float and the
+    same rows give identical integers on any platform."""
+    lut = [0] * max(1, rows)
+    denom = max(1, rows - 1)
+    for r in range(rows):
+        # t in 0..1024 fixed point.
+        t = (r * 1024) // denom
+        # integer pow approximation: t^(gamma) for gamma = gamma_num/gamma_den,
+        # done by repeated integer multiply for the integer part and a single
+        # linear blend for the fractional part. gammas used here are 8/5 and 11/5,
+        # both in [1, 3], so one or two multiplies plus a fractional blend suffice.
+        whole = gamma_num // gamma_den
+        frac_num = gamma_num - whole * gamma_den       # remaining /gamma_den
+        # t_pow_whole = t^whole in the same 0..1024 scale.
+        tp = 1024
+        for _ in range(whole):
+            tp = (tp * t) // 1024
+        # one extra factor of t^(frac_num/gamma_den), linearly interpolated between
+        # t^0 (=1024) and t^1 (=t) by frac_num/gamma_den. integer blend.
+        extra = (1024 * (gamma_den - frac_num) + t * frac_num) // gamma_den
+        tg = (tp * extra) // 1024                       # t^gamma, 0..1024
+        shade = far + ((near - far) * tg) // 1024
+        lut[r] = int(max(0, min(16, shade)))
+    return lut
+
+
+# Vertical wall texture LUT. Index is the integer wall-hit fraction within the
+# cell (0..15), value is a small signed brightness bias added before the Bayer
+# compare, a shallow repeating groove so flat walls gain faint vertical banding.
+HW_WALL_TEX = [2, 1, 0, -1, -2, -1, 0, 1, 2, 1, 0, -1, -2, -1, 0, 1]
+
+# Resolution presets for the integer oracle. "lo" is the 64x32 signal panel (the
+# required target). "hi" is a 128x64 panel built from the same integer math, for
+# completeness. Each ray is drawn `colw` pixels wide to fill the width.
+HW_RES = {
+    "lo": {"w": SCREEN_W, "h": SCREEN_H, "cols": NUM_COLS, "colw": SCREEN_W // NUM_COLS},
+    "hi": {"w": 128, "h": 64, "cols": 64, "colw": 2},
+}
+
+
+def _cast_hw(px, py, angle):
+    """The SAME integer DDA as _cast, returning (hit_step, wall_frac).
+
+    hit_step is the integer micro-step index of the wall hit (1..STEPS), exactly
+    what _cast returns. wall_frac (0..15) is the sub-cell coordinate along the hit
+    face, read straight out of the low nibble of the integer ray position, so the
+    texture coordinate is pure integer too. The texture axis is chosen by which
+    integer cell coordinate changed on the hitting step (an integer >>4 compare),
+    mirroring _cast_hi's face pick without any float. No np.cos/np.sin/np.floor."""
+    dxm, dym = DIRX_MAG[angle], DIRY_MAG[angle]
+    sx, sy = SIGNX[angle], SIGNY[angle]
+    x, y = px, py
+    for step in range(1, STEPS + 1):
+        prev_cx, prev_cy = x >> 4, y >> 4
+        x = (x - dxm) if sx else (x + dxm)
+        y = (y - dym) if sy else (y + dym)
+        cx, cy = x >> 4, y >> 4
+        if _cell_solid(cx, cy):
+            crossed_x = cx != prev_cx
+            crossed_y = cy != prev_cy
+            if crossed_x and not crossed_y:
+                frac = y & 0x0F          # vertical face: texture by the y position
+            elif crossed_y and not crossed_x:
+                frac = x & 0x0F          # horizontal face: texture by x
+            else:
+                # corner (both or neither flipped): pick the dominant ray axis by
+                # the integer delta magnitudes, an integer compare.
+                frac = (y & 0x0F) if dxm >= dym else (x & 0x0F)
+            return step, frac
+    return STEPS, 0
+
+
+def render_reference_hw(
+    heading: int,
+    px: int = PLAYER_X,
+    py: int = PLAYER_Y,
+    res: str = "lo",
+    texture: bool = True,
+) -> np.ndarray:
+    """The PURE-INTEGER gorgeous 1-bit oracle: render_reference's integer DDA with
+    the render_reference_hi look, rebuilt with integer LUTs so a NOR/FSM datapath
+    can reproduce it bit for bit.
+
+    Pure and deterministic: the returned (h, w) uint8 0/1 framebuffer is a fixed
+    function of (heading, px, py, res, texture), pinned by sha256 in the tests.
+    NO float, np.cos, np.sin or np.floor appears in the per-column or per-pixel
+    path; the only float is in the module-load shade-LUT builders, which are
+    hardwired constant landscape on the substrate.
+
+    heading is the integer angle index 0..NUM_ANGLES-1 (the same heading space as
+    render_reference). res is "lo" (64x32, the signal panel, the required target)
+    or "hi" (128x64). texture toggles the vertical wall texture LUT.
+
+    This is a SEPARATE contract from render_reference / build_rom (unchanged) and
+    from render_reference_hi (the float look). This frame is the FSM's bit-exact
+    integer target.
+    """
+    cfg = HW_RES[res]
+    w, h, cols, colw = cfg["w"], cfg["h"], cfg["cols"], cfg["colw"]
+    disp = np.zeros((h, w), dtype=np.uint8)
+    half = h // 2
+
+    # plane shade LUTs sized to this panel's half-height, built once per call from
+    # integer math. floor brighter and reaching higher than the dark ceiling.
+    floor_rows = h - half
+    ceil_rows = half if half > 0 else 1
+    floor_shade = _build_plane_shade_lut_int(max(1, floor_rows), near=11, far=1,
+                                             gamma_num=8, gamma_den=5)
+    ceil_shade = _build_plane_shade_lut_int(max(1, ceil_rows), near=4, far=0,
+                                            gamma_num=11, gamma_den=5)
+
+    # height scaling: the plain RECIP is tuned for SCREEN_H=32, so scale it to this
+    # panel by an integer ratio h/SCREEN_H (1 for "lo", 2 for "hi").
+    hscale = h // SCREEN_H if h >= SCREEN_H else 1
+
+    # first pass: per-column integer ray cast -> (hit_step, slice top/bottom, wall
+    # shade, wall frac). The hit step is the integer depth key for the seam test.
+    dists = [0] * cols
+    tops = [0] * cols
+    bots = [0] * cols
+    wsh = [0] * cols
+    wfr = [0] * cols
+    for c in range(cols):
+        ang = (heading + COL_ANGLE[(c * NUM_COLS) // cols]) % NUM_ANGLES
+        dist, frac = _cast_hw(px, py, ang)
+        line_h = RECIP[dist] * hscale
+        if line_h > h:
+            line_h = h
+        top = (h - line_h) // 2
+        if top < 0:
+            top = 0
+        bot = top + line_h
+        if bot > h:
+            bot = h
+        dists[c] = dist
+        tops[c] = top
+        bots[c] = bot
+        wfr[c] = frac
+        wsh[c] = HW_STEP_SHADE[dist]
+
+    # depth-discontinuity seam: a column is a depth edge if a neighbour's integer
+    # hit-step differs by at least the threshold (a corner / occlusion boundary).
+    DEPTH_SEAM_THRESH = 4   # micro-step jump that counts as a depth edge.
+    depth_edge = [False] * cols
+    for c in range(cols):
+        left = dists[c - 1] if c > 0 else dists[c]
+        right = dists[c + 1] if c < cols - 1 else dists[c]
+        if abs(dists[c] - left) >= DEPTH_SEAM_THRESH or \
+           abs(dists[c] - right) >= DEPTH_SEAM_THRESH:
+            depth_edge[c] = True
+
+    # second pass: paint ceiling, floor, then the Bayer-dithered wall slice, then
+    # the 1px black seams and the depth seam. Every test is an integer compare.
+    for c in range(cols):
+        top, bot = tops[c], bots[c]
+        shade = wsh[c]
+        if texture:
+            shade = max(2, min(16, shade + HW_WALL_TEX[wfr[c] & 0x0F]))
+        x0 = c * colw
+        x1 = x0 + colw
+        for x in range(x0, x1):
+            bx = x & 3
+            # ceiling: rows above the slice top, dithered by distance from horizon.
+            for y in range(0, top):
+                ri = half - 1 - y
+                if ri < 0:
+                    ri = 0
+                if ri >= len(ceil_shade):
+                    ri = len(ceil_shade) - 1
+                s = ceil_shade[ri]
+                if s > 0 and BAYER4_HW[y & 3][bx] < s:
+                    disp[y, x] = 1
+            # floor: rows below the slice bottom.
+            for y in range(bot, h):
+                ri = y - half
+                if ri < 0:
+                    ri = 0
+                if ri >= len(floor_shade):
+                    ri = len(floor_shade) - 1
+                s = floor_shade[ri]
+                if s > 0 and BAYER4_HW[y & 3][bx] < s:
+                    disp[y, x] = 1
+            # wall slice: Bayer-dithered by the column's wall shade.
+            for y in range(top, bot):
+                if BAYER4_HW[y & 3][bx] < shade:
+                    disp[y, x] = 1
+
+        # 1px black edge seams at the slice top and bottom, outlining the slab.
+        if bot > top:
+            if 0 <= top < h:
+                disp[top, x0:x1] = 0
+            if 0 <= bot - 1 < h:
+                disp[bot - 1, x0:x1] = 0
+
+        # depth-discontinuity seam: a black vertical line over the slice extent.
+        if depth_edge[c] and bot > top:
+            disp[top:bot, x0:x1] = 0
+
+    return disp
+
+
 # --- the ROM builder --------------------------------------------------------
 #
 # Register map for the assembled program:

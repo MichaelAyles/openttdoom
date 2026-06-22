@@ -325,3 +325,39 @@ Concrete next step: solve the one-edge output register in game (blocker 1's open
 its footprint into `place.REG_W`/`REG_H` and its pin offsets into `place._register_*_pin_offset`, the
 same swap-in-the-real-footprint move that closed the combinational NOR. The placement, routing, clock
 distribution, DRC and reconstruction are already done and verified in software.
+
+## 8. The channel router crowds risers at CPU scale (~1600 cells): DRC shorts. Logic is fine, routing is not DRC-clean at this size.
+
+The minimal 8-bit accumulator CPU (`hdl/cpu.py`, the Fibonacci machine) is fully verified as LOGIC:
+the behavioural Amaranth `Cpu`, the structural gate + DFF `build_cpu_netlist`, its all-NOR
+`to_nor(keep_registers=True)` lowering, and the netlist RECONSTRUCTED from its placement all emit
+exactly the 13 eight-bit Fibonacci terms then the mod-256 overflow term, and the structural form steps
+cycle-for-cycle identically to the behavioural model across every exposed bit (ACC, PC, Z, phase,
+out_we, out_port) over many edges. See `hdl/test_cpu.py` (20 tests, all green).
+
+What does NOT close: the lowered CPU (1631 cells: 1575 NOR + 54 register tiles + 2 const) PLACES and
+ROUTES to 100 percent of nets (1632/1632), with the clock reaching every one of the 54 register tiles,
+but `drc()` reports ~410 route shorts (mostly `route_short` "orientations V/X", plus one
+`pin_collision`). These are NOT a flaw in the CPU and NOT a logic error: they are a SCALE limit of the
+SHARED constructive channel router (`place_and_route/channel_route.py`), which this work was told to use
+as-is and not modify. The router gives each pin riser its own isolated column via `_assign_riser_columns`;
+at ~1600 cells with the CPU's dense fan-in/fan-out the clear-column supply runs out and the documented
+fallback ("take the nearest free column to the right ... surfaces honestly as a route_cuts_cell DRC
+violation, never a faked path") fires many times. Evidence it is scale, not the design: the 4-bit adder
+(92 cells) and the 8XY ALU (893 cells, combinational) both route DRC-clean through the same router; the
+sequential toggle/shift/3-bit-counter (<=37 cells) route DRC-clean too. The CPU is simply ~2x larger and
+denser than anything previously placed.
+
+The fix is in the ROUTER contract, not in the CPU. Concrete next directions for the human, none built
+(all are router changes, deliberately out of scope here):
+  (a) widen the riser-column budget: `_widen_placement`'s per-channel spacing (SP=2, CHANNEL_SLACK=2)
+      is sized for the adder; give each channel more clear columns so dense columns never exhaust the
+      supply, at the cost of a wider map (cheap on OpenTTD).
+  (b) split the single clock SPINE into a few parallel trunk rows (a shallow H-tree) so the 54 clock
+      risers do not all crowd one band, and let other nets reuse the freed columns.
+  (c) a second routing pass that re-columns only the nets that took the fallback, since the failures are
+      localised (the bulk of nets route clean on the first pass).
+`hdl/test_cpu.py::test_cpu_places_routes_completely` asserts what genuinely holds at this scale
+(complete routing, 54 register tiles, clock reach) and documents this DRC item rather than asserting a
+clean result that the shared router cannot deliver. This is an honest negative on the BACKEND at scale,
+on top of a fully working CPU.

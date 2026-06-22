@@ -14,7 +14,9 @@ routing now reaches 100 percent via perpendicular bridge crossings, and a full y
 (oss-cad-suite) now runs the proper verilog to NOR synthesis, verified equivalent to the
 Python flow. The remaining blockers are the physical gate geometry and the GameScript runtime.
 
-Total test count: 225 passing (`python -m pytest -q`).
+Total test count: 267 passing (`python -m pytest -q`), of which 20 are the M5 accumulator-CPU
+suite (`hdl/test_cpu.py`). (The non-CPU count grew past the 225 noted earlier as parallel tracks
+landed; the M5 work added the 20 CPU tests and left every other test green.)
 
 ## Milestone by milestone
 
@@ -370,6 +372,45 @@ every step, verified in software. The scenario and GameScript data are emitted
 What does not close is the last hop: a GameScript stamping a NOR tile that actually computes
 in OpenTTD, because the gate geometry is unsolved. That is the brief's expected outcome for
 M4 ("build the whole pipeline and isolate the exact blocker"), and it is isolated in STUCK.md.
+
+### M5, a whole CPU. The Fibonacci accumulator machine CLOSES AS LOGIC IN SOFTWARE; the backend does not route it DRC-clean at this scale.
+
+The sequential toolchain (the m.d.sync -> register + NOR path, the register place-and-route) was
+de-risked on a toggle and a counter; this is the real clocked design it was built for: a minimal
+8-bit ACCUMULATOR CPU that fetches and executes a hardwired program and emits the Fibonacci
+sequence on a memory-mapped output latch. `hdl/cpu.py`, tests in `hdl/test_cpu.py` (20, all green).
+
+- Lean by design (state is the scarce resource on the train substrate). The whole architectural
+  state is 54 register bits: ACC(8) + PC(4) + Z(1) + phase(1) + IR_op(4) + IR_arg(4) + DMEM(4x8=32).
+  NOT a CHIP-8, NOT a wrapper on the 891-NOR ALU.
+- Six-opcode ISA (8-bit word, opcode high nibble, 4-bit operand low nibble): LDI imm, ADD addr,
+  SUB addr, STA addr (writes a scratch reg or the OUTPUT latch), BZ addr (branch if zero),
+  JMP addr. A two-phase FETCH/EXEC FSM. The datapath REUSES the ripple-carry full adder and the
+  sub = x + ~y + 1 trick from hdl/adder.py / hdl/alu.py (add/sub/pass only, not the whole ALU), a
+  one-hot opcode decode like alu.py's, a wide-NOR zero flag, and a result mux into ACC. The ROM is a
+  hardwired pc-indexed multiplexer; DMEM is an addressed register file.
+- Three views, the same discipline as the adder/ALU: a plain Python `cpu_reference` (the
+  architectural ground truth), a behavioural Amaranth `Cpu` (m.d.sync registers), and a structural
+  gate + DFF `build_cpu_netlist` (1515 NOR + 54 DFF + 2 const = 1571 cells structural; lowering to
+  the buildable set with `to_nor(keep_registers=True)` gives 1575 NOR + 54 register tiles = 1631).
+- Verified, by running, NOT asserted: all three views (and the all-NOR lowering, and the netlist
+  RECONSTRUCTED from its own placement) emit exactly 1,1,2,3,5,8,13,21,34,55,89,144,233 (the 13
+  eight-bit Fibonacci terms) then the mod-256 overflow term 121, and free-run the recurrence mod 256
+  after. The structural netlist steps CYCLE-FOR-CYCLE IDENTICALLY to the behavioural Cpu across every
+  exposed bit (ACC, PC, Z, phase, the out_we strobe and the out_port value) over 80 edges. Each of the
+  six opcodes is exercised individually through both the reference and the structural netlist (LDI,
+  ADD, SUB with mod-256 wrap and the zero flag, STA, BZ taken and not-taken, JMP).
+- The Fibonacci loop is a neat trick worth noting: the window slide (A,B) -> (B, A+B) uses NO
+  temporary, via the identity oldB = next - oldA (since next = oldA + oldB), so a single SUB does the
+  slide and the whole program fits the 16-word ROM with a JMP.
+- WHAT DOES NOT CLOSE (isolated, STUCK.md #8): the lowered CPU PLACES and ROUTES to 100 percent of
+  nets (1632/1632) with the clock reaching every one of the 54 register tiles, but `drc()` reports
+  ~410 route shorts at this size. These are a SCALE limit of the shared constructive channel router
+  (`place_and_route/channel_route.py`, a pipeline contract this work must not modify), which exhausts
+  its clear riser-column supply at ~1600 dense cells and takes its documented fallback. It is NOT a
+  CPU flaw: the 92-cell adder and the 893-cell ALU both route DRC-clean through the same router. The
+  CPU LOGIC is fully verified; the DRC-clean-at-scale routing is the open backend item, with three
+  concrete router-side fixes noted in STUCK.md #8.
 
 ## The tricky bits handed to the human (file pointers)
 

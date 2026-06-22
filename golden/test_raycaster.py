@@ -272,3 +272,120 @@ def test_hi_frame_pinned(key, want):
     assert lit == want_lit, f"{res} h{heading} lit {lit}, expected {want_lit}"
     got = _hi_hash(f)
     assert got == want_hash, f"{res} h{heading} hash {got}, expected {want_hash}"
+
+
+# --- (e) the PURE-INTEGER 1-bit oracle (render_reference_hw) -----------------
+# A THIRD contract, the one the hardware FSM is actually built to match. Unlike
+# render_reference_hi (which uses float trig and so cannot be reproduced by a NOR
+# netlist bit for bit), render_reference_hw is the SAME integer fixed-point DDA as
+# the plain render_reference, with the gorgeous look rebuilt entirely from integer
+# LUT lookups keyed off the integer hit-step. Because it is pure integer and
+# deterministic, the FSM can reproduce it exactly. These tests prove it is integer
+# (no float leaks into the frame: a re-run is byte-identical), supports the 64x32
+# panel, wires in every feature, and pin the exact frames by sha256 so a change to
+# the integer oracle that alters any frame fails loudly here. The plain
+# render_reference / build_rom and the float render_reference_hi contracts above
+# are untouched and still checked.
+
+def test_hw_resolutions_have_expected_shapes():
+    # the required 64x32 signal panel, plus a 128x64 panel from the same integer
+    # math. binary framebuffer, every pixel 0 or 1.
+    lo = rc.render_reference_hw(0, res="lo")
+    hi = rc.render_reference_hw(0, res="hi")
+    assert lo.shape == (32, 64)
+    assert hi.shape == (64, 128)
+    assert lo.dtype == np.uint8 and hi.dtype == np.uint8
+    assert set(np.unique(lo)).issubset({0, 1})
+    assert set(np.unique(hi)).issubset({0, 1})
+
+
+@pytest.mark.parametrize("res", ["lo", "hi"])
+@pytest.mark.parametrize("heading", [0, 7, 12, 24])
+def test_hw_is_deterministic(res, heading):
+    # same inputs -> identical framebuffer and hash. Being PURE INTEGER, this holds
+    # exactly and platform-independently (no float rounding), which is precisely the
+    # property the FSM is later required to match.
+    a = rc.render_reference_hw(heading, res=res)
+    b = rc.render_reference_hw(heading, res=res)
+    assert np.array_equal(a, b)
+    assert _hi_hash(a) == _hi_hash(b)
+
+
+def test_hw_matches_plain_renderer_hit_distance():
+    # the hardware oracle MUST cast with the same integer DDA as render_reference:
+    # _cast_hw's hit step is exactly _cast's, so the wall geometry is shared. Check
+    # every column of every heading agrees on the hit step (the depth key).
+    for heading in range(rc.NUM_ANGLES):
+        for col in range(rc.NUM_COLS):
+            ang = (heading + rc.COL_ANGLE[col]) % rc.NUM_ANGLES
+            step_plain = rc._cast(rc.PLAYER_X, rc.PLAYER_Y, ang)
+            step_hw, _frac = rc._cast_hw(rc.PLAYER_X, rc.PLAYER_Y, ang)
+            assert step_hw == step_plain, (
+                f"heading {heading} col {col}: hw step {step_hw} != plain {step_plain}"
+            )
+
+
+def test_hw_texture_changes_the_frame():
+    # the vertical wall texture LUT must be wired in: toggling it changes the wall
+    # pixels (otherwise it is dead decoration).
+    on = rc.render_reference_hw(7, res="lo", texture=True)
+    off = rc.render_reference_hw(7, res="lo", texture=False)
+    assert not np.array_equal(on, off)
+
+
+def test_hw_frames_change_as_player_turns():
+    # turning must change the view; adjacent depth-rich headings must not collapse
+    # to identical frames.
+    frames = [rc.render_reference_hw(h, res="lo") for h in (0, 4, 8, 12, 16)]
+    hashes = {f.tobytes() for f in frames}
+    assert len(hashes) == len(frames), "some headings rendered identical hw frames"
+
+
+def test_hw_has_dithered_floor_and_ceiling():
+    # the floor and dark ceiling integer fills must produce lit pixels in their
+    # regions (not a void), so the slab floats inside a room.
+    f = rc.render_reference_hw(7, res="lo")
+    h, w = f.shape
+    assert int(f[3 * h // 4 :, :].sum()) > 0, "no floor dither"
+    assert int(f[: h // 4, :].sum()) > 0, "no ceiling dither"
+
+
+def test_hw_has_edge_and_depth_seams():
+    # the 1px black slice seams and the depth-discontinuity seams must actually cut
+    # the frame: with a wall slice present, some interior wall rows must be dark
+    # (the seams), so the slab is outlined rather than a solid block.
+    f = rc.render_reference_hw(7, res="lo")
+    # the slice band around the vertical centre should contain both lit and unlit
+    # columns (dither + seams), never a fully solid rectangle.
+    h, w = f.shape
+    band = f[h // 2 - 2 : h // 2 + 2, :]
+    assert int(band.sum()) > 0 and int(band.sum()) < band.size, "no seams/dither in slice band"
+
+
+# pinned PURE-INTEGER oracle frames: exact fingerprints captured from the verified
+# integer renderer. These FREEZE the FSM's bit-exact target. Because the renderer
+# is integer-only these hashes are platform-independent. A change to the integer
+# oracle math that alters any frame fails loudly here; regenerate only on a
+# deliberate design change.
+PINNED_HW = {
+    # (res, heading): (lit pixels, sha256 of frame.tobytes())
+    ("lo", 0): (484, "1e789be89084f9645d6934632a3731eec707f6d64cdd26564a4d7a9eb21a7a6b"),
+    ("lo", 7): (535, "975ed3c87de95fff8e14b82403f0f8eb800df02ed40928b1a5b2449638fe31e7"),
+    ("lo", 12): (687, "3955292d6d7ffe2269a3dcca54a646f5b70a555c5ec8af5c939bf293485a5b46"),
+    ("lo", 24): (962, "e60acf4ae9ad87f358817fca2d02ec3545f03b27ba933449919a73c7b9e402de"),
+    ("hi", 0): (2122, "50ca060e00979fb55f3fdc1c64e6677fe0be7857b926dc6575337cda4197e985"),
+    ("hi", 7): (2329, "f09a7b966399a79f42144ddaffac9ecc90876f32ab67137861024329f772f159"),
+    ("hi", 12): (2937, "d8ee4851a6381f519d41a65bc7ab4a2640d3d6419ef55f47001f382577a08859"),
+    ("hi", 24): (3972, "c376166afcb5c4508f7c7833bcdd9ce84af8975d19040d02421dff39c56ca259"),
+}
+
+
+@pytest.mark.parametrize("key,want", list(PINNED_HW.items()))
+def test_hw_frame_pinned(key, want):
+    res, heading = key
+    want_lit, want_hash = want
+    f = rc.render_reference_hw(heading, res=res)
+    lit = int(f.sum())
+    assert lit == want_lit, f"{res} h{heading} lit {lit}, expected {want_lit}"
+    got = _hi_hash(f)
+    assert got == want_hash, f"{res} h{heading} hash {got}, expected {want_hash}"
