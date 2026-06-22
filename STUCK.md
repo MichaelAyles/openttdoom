@@ -291,9 +291,28 @@ Consequence: the OpenTTD speed fork (stripped tick loop, uncapped speed) is NO L
 -blocked. It is still real work (modify the engine source, rebuild), but the toolchain to do it is
 present and proven.
 
-## 7. The physical OpenTTD REGISTER TILE geometry. The footprint is RESERVED; the in-tile track is open.
+## 7. The clocked 1-bit REGISTER. NOW PROVEN IN GAME (a held bit, 2/3 runs); the place-and-route tile stamp remains the fold-in.
 
-The place-and-route backend now handles CLOCKED designs: a DFF is placed as a register tile and the
+NOW RESOLVED (the primitive): a clocked 1-bit register WORKS on actual OpenTTD trains
+(`scenarios/register_gs/`). The stored bit Q is the PRESENCE of a parked train on a HOLD tile inside a
+protected block (a parked train persists indefinitely, and that is the memory); Q is read by the proven
+block-signal NOR (a fresh eastbound reader is HELD iff HOLD is occupied), judged from the RAW reader x,
+and the write is clock-gated (write-1 builds + parks a train on HOLD at a clock edge, write-0 sends it to
+a sink depot; between edges Q is untouched, so it HOLDS). The reader is disposed and rebuilt FRESH each
+edge, so the bit read at edge k+1 comes only from the persistent HOLD train, not a leftover reader.
+Verified by the orchestrator across fresh dedicated-server runs: schedule W1,-,-,W0,- gave readout
+`RG 11100` in 2 of 3 runs (per-edge raw x: e0 x45 q1, e1 x45 q1, e2 x45 q1, e3 x47 q0), i.e. the bit was
+written 1, HELD 1 across two no-write clock edges, then UPDATED to 0 on the clocked write and held 0. The
+one failure was `CKFAIL` (the known flaky clock LAUNCH, not the register losing its bit). So the missing
+T3 primitive, a clocked element that HOLDS state across edges and updates on a clock-gated write, is real
+and demonstrated; reliability is bounded by the same flaky clock launch (~2/3) seen elsewhere, and
+multi-bit composition is the next scale step.
+
+STILL OPEN (the place-and-route TILE stamp): the standalone register above is hand-built in a GameScript,
+proving the primitive. What is not yet done is folding that geometry into the emitter so the toolchain
+auto-stamps a register tile (the same pattern as the combinational NOR: proven in-game first in
+`scenarios/norgate_gs/`, then folded into place-and-route). The backend already handles CLOCKED designs: a
+DFF is placed as a register tile and the
 clock-distribution net is routed to every register (toggle flip-flop, shift register, 3-bit counter
 all place + route to 100 percent of nets, 0 DRC violations, clock reaching every register, and the
 emitted scenario reconstructs to a cycle-for-cycle-equivalent sequential netlist with an equivalent
