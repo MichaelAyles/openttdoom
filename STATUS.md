@@ -14,7 +14,7 @@ routing now reaches 100 percent via perpendicular bridge crossings, and a full y
 (oss-cad-suite) now runs the proper verilog to NOR synthesis, verified equivalent to the
 Python flow. The remaining blockers are the physical gate geometry and the GameScript runtime.
 
-Total test count: 80 passing (`python -m pytest -q`).
+Total test count: 225 passing (`python -m pytest -q`).
 
 ## Milestone by milestone
 
@@ -270,6 +270,87 @@ Total test count: 80 passing (`python -m pytest -q`).
   `scenario_to_netlist()` reconstructs the logic from the placed cells and routes;
   `verify_equivalence()` proves the placement preserved the function. The 1, 2 and 4-bit
   adders now route to 100 percent with zero DRC violations.
+
+### M3 extension, SEQUENTIAL synthesis. DONE, verified in software.
+
+The toolchain reached combinational logic only; it now also lowers CLOCKED designs. Built on
+the register cell (the `DFF` in `synth/netlist.py`, lowered to an all-NOR master-slave latch by
+`to_nor()`), the synthesis spine now has a full Amaranth `m.d.sync` to register-netlist path.
+
+- `hdl/sequential.py` is the sequential counterpart of `hdl/adder.py`. Two worked examples, each
+  in the adder's three views: a 1-bit TOGGLE flip-flop and an n-bit up COUNTER with enable.
+  View 1 is behavioural Amaranth using `m.d.sync` (`Toggle`, `Counter`), simulated with
+  `amaranth.sim` over several clock cycles. View 2 is a tool-free STRUCTURAL gate + DFF netlist
+  (`build_toggle_ff`, `build_counter`) built from `NetlistBuilder` using the new `dff_into()`
+  for the state-feedback registers (the counter's incrementer reads the register outputs and
+  feeds the register inputs, a real state-to-logic-to-state loop). View 3 is a plain Python
+  reference (`toggle_reference`, `counter_reference`), the ground truth, mirroring
+  `alu8_reference`. The structural counter matches the reference exactly for 2, 3 and 4 bits,
+  and both lower to the buildable `{NOR, CONST0, CONST1}` set plus the latch feedback.
+- `synth/netlist.py` gained the SEQUENTIAL EQUIVALENCE check the brief asked for. `equivalent()`
+  compares COMBINATIONAL netlists by their full truth table; a clocked netlist has no static
+  truth table (it is a function of the input history), so `sequential_equivalent(a, b, trace)`
+  drives both netlists with the identical input trace one full clock cycle per entry and asserts
+  their output traces (and, with `state_nets`, their internal register-state traces) are equal
+  cycle for cycle. `simulate_trace()` is the underlying stepper (the sequential analogue of
+  `truth_table()`), and `NetlistBuilder.dff_into()` drives a register output net reserved up
+  front so feedback loops can be wired (also reused by the place-and-route keep-register lowering).
+- `synth/synth_seq.py` is the entry point (like `synth/synth.py`): it writes the structural and
+  buildable-lowered toggle and counter netlists to `synth/out/`. When a full yosys is installed
+  it ALSO runs the proper verilog to `$_DFF_P_` + NOR flow (`synth/yosys_seq.py`): yosys emits a
+  synchronous-reset enabled flop for the `m.d.sync` register, `dfflegalize -cell $_DFF_P_ 0`
+  lowers it to a PLAIN positive-edge D flip-flop (enable and reset pushed into the data logic),
+  which imports straight onto the `DFF` cell, and `abc -g NOR -dff -keepff` maps the rest to NOR.
+  Verified here: the yosys 2-bit counter (2 DFF + 13 NOR) computes the reference up-count exactly.
+- Honest note on the lowering. The all-NOR master-slave latch has no async reset (the train
+  substrate has none either), so a SELF-FEEDBACK register such as this counter or the toggle
+  powers on at a physically arbitrary state. With no external data path to flush it, the
+  behavioural-DFF form and its `to_nor()` all-NOR form run the SAME transition function but from
+  a CONSTANT state offset (the counter's lowering is consistently +1, proven across a long random
+  trace), rather than matching from cycle 0. For registers WITH an external data path (the DFF,
+  the shift register) `sequential_equivalent` matches exactly after the pipeline is flushed
+  (`skip_cycles` = register depth). The yosys flop, which has a real synchronous reset to 0,
+  powers on at 0 and matches the reference with no offset. This is documented in
+  `NetlistBuilder.dff_nor` and pinned by the tests, not papered over.
+- Tests: `hdl/test_sequential.py` (16) covers behavioural-vs-reference, structural-vs-reference,
+  the buildable lowering and its constant-offset transition equivalence, the worked example end
+  to end, and the optional yosys cross-check; `synth/test_register.py` gained 6 contract tests for
+  `simulate_trace` / `sequential_equivalent` / `dff_into`. All green.
+
+SEQUENTIAL PLACE-AND-ROUTE (registers + a clock-distribution net), DONE in software. The placer
+and router were extended from combinational-only to CLOCKED designs, so the same sequential
+netlists above flow all the way to a placed, routed scenario:
+
+- `place_and_route/place.py` places a DFF as a REGISTER TILE (`REG_W`x`REG_H`, bigger than a NOR)
+  with the clock on its OWN west-edge pin (`PlacedCell.clock`), off the data pins, so the clock
+  never shorts onto data. The level pass treats a register as a TIMING BOUNDARY (a cell reading a
+  register's Q does not chain its column through the register), so a sequential netlist with
+  feedback through a register (the toggle, the counter) is placeable instead of looking like a
+  combinational loop. A purely combinational loop still raises.
+- `place_and_route/channel_route.py` routes the CLOCK net like any other net: one source fans out
+  to every register's clock pin via the net's unique trunk row (the clock SPINE) plus a riser onto
+  each clock pin, crossing other nets only as legal perpendicular bridges. So the clock reaches
+  every register tile with no clock-specific routing rule. Honest simplification: this is a single
+  trunk-row spine, not a buffered H-tree, which is sufficient for the train-loop clock model.
+- `synth/netlist.py` gained `to_nor(keep_registers=True)` (lower the logic to NOR but keep each
+  register as one placeable DFF tile) and `combinational_cone()` (cut the registers so the
+  next-state/output logic has a static truth table for `equivalent()`). `scenario.py`,
+  `check.py` and `emit.py` carry the clock pin/reset through placement, JSON, the `.nut`, the DRC
+  (clock pin is a legal landing tile, the clock route must reach every register), reconstruction
+  and map sizing, all backward compatible (old JSON without the fields still loads).
+- Verified end to end on the toggle flip-flop and the up-counter FROM THE SYNTH WORK plus a
+  4-stage shift register: each PLACES with one register tile per DFF, ROUTES to 100 percent of
+  nets with 0 DRC violations, the clock reaches EVERY register, and the emitted Scenario/.nut
+  RECONSTRUCTS to a netlist that steps cycle-for-cycle identically under SeqSim AND whose
+  combinational cone is `equivalent()` to the source cone. The 3-bit counter is saved as
+  `scenarios/counter3.scenario.json`/`.nut` (37 cells: 3 register tiles + 33 NOR + 1 CONST, 38/38
+  nets routed, 613 bridge crossings). Tests: `place_and_route/test_pnr_register.py` (12) and 4 new
+  cone/keep-register cases in `synth/test_register.py`.
+- HONEST CAVEAT: `REG_W`/`REG_H` are a footprint RESERVATION. The exact in-tile track-and-signal
+  geometry of a register tile (the physical master-slave latch and its clock tap) is NOT solved in
+  game and is TODO(human), exactly as the combinational NOR footprint was reserved before its
+  geometry was proven in game. Placement, routing, DRC, emission and reconstruction all close
+  around the reservation; only the in-game register tile geometry is open (STUCK.md).
 
 ### M4, the 4-bit adder end to end. CLOSES IN SOFTWARE. The OpenTTD realisation is blocked on M2.
 

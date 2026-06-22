@@ -87,6 +87,10 @@ def drc(scenario: Scenario) -> List[Violation]:
         pins = list(c.inputs)
         if c.output is not None:
             pins.append(c.output)
+        # A register tile's clock pin carries the clock net and must not share a tile with the
+        # cell's data/output pins (that would short the clock onto data), so include it here.
+        if c.clock is not None:
+            pins.append(c.clock)
         for pin in pins:
             nets_on_tile.setdefault((pin.x, pin.y), set()).add(pin.net)
     for t in sorted(nets_on_tile):
@@ -105,6 +109,10 @@ def drc(scenario: Scenario) -> List[Violation]:
             pins_of_net.setdefault(c.output.net, set()).add((c.output.x, c.output.y))
         for pin in c.inputs:
             pins_of_net.setdefault(pin.net, set()).add((pin.x, pin.y))
+        # The clock pin is a legal landing tile for the clock-distribution net's route, so the
+        # clock riser terminating on it is not a route_cuts_cell violation.
+        if c.clock is not None:
+            pins_of_net.setdefault(c.clock.net, set()).add((c.clock.x, c.clock.y))
     pad_owner: Dict[Coord, str] = {}
     for pad in scenario.io:
         pad_owner[(pad.x, pad.y)] = pad.net
@@ -248,10 +256,19 @@ def _routes_connect(scenario: Scenario) -> Dict[str, bool]:
             src_pin[c.output.net] = (c.output.x, c.output.y)
         for pin in c.inputs:
             con_pins.setdefault(pin.net, []).append((pin.x, pin.y))
+        # A register's clock pin consumes the clock-distribution net: the clock route must
+        # physically reach every register tile, so the clock counts as unrouted if it does not.
+        if c.clock is not None:
+            con_pins.setdefault(c.clock.net, []).append((c.clock.x, c.clock.y))
 
     # Primary input nets get their source from an input pad.
     for pad in scenario.input_pads():
         src_pin.setdefault(pad.net, (pad.x, pad.y))
+
+    # A clock-distribution net that is not a primary input is sourced from its clock pad.
+    for pad in scenario.io:
+        if pad.kind == "clock":
+            src_pin.setdefault(pad.net, (pad.x, pad.y))
 
     # Primary OUTPUT pads are consumers of their net: the route must physically reach the
     # framebuffer/output pad, not just the cell input pins. Without this an output route that
@@ -351,14 +368,18 @@ def scenario_to_netlist(scenario: Scenario, require_routed: bool = False) -> Net
             raise ValueError(
                 "scenario routes do not connect named nets: " + ", ".join(sorted(missing)))
 
-    # Rebuild cells from placed-cell pins (the spatial net names).
+    # Rebuild cells from placed-cell pins (the spatial net names). A register tile carries its
+    # clock net on a dedicated clock pin (off the data inputs), so reconstruct the DFF with that
+    # clock net and reset value recovered spatially, exactly as the netlist Cell carries them.
     cells: List[Cell] = []
     for pc in scenario.cells:
         in_nets = [p.net for p in pc.inputs]
         out_net = pc.output.net if pc.output is not None else None
         if out_net is None:
             raise ValueError(f"placed cell {pc.id} has no output pin")
-        cells.append(Cell(id=pc.id, type=pc.type, inputs=in_nets, output=out_net))
+        clk_net = pc.clock.net if pc.clock is not None else None
+        cells.append(Cell(id=pc.id, type=pc.type, inputs=in_nets, output=out_net,
+                          clock=clk_net, reset=pc.reset))
 
     inputs = [pad.net for pad in scenario.input_pads()]
     outputs = [pad.net for pad in scenario.output_pads()]

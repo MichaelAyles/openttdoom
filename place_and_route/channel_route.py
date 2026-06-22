@@ -42,6 +42,16 @@ crossing between two different nets is perpendicular (a legal bridge):
 The result is a fully routed scenario with zero genuine shorts: every net reaches every pin,
 and every shared tile is a clean perpendicular bridge crossing recorded honestly in bridges.
 
+Sequential designs (the clock-distribution net). A register tile (a placed DFF) carries its
+clock on a dedicated clock pin, which the router treats as a consumer of the clock net. The
+clock net is then routed exactly like any data net: one source (a clock source pad, or the
+clk primary-input pad, or a cell-driven clock's driver) fans out to every register's clock pin
+via the net's unique trunk row. That trunk row is the CLOCK SPINE, a single horizontal run the
+width of the design with a riser dropping onto each register's clock pin, so the clock reaches
+every register tile. It crosses other nets only as legal perpendicular bridges, so no
+clock-specific routing rule is needed (honest simplification: a single spine, not a buffered
+H-tree, which suits the train-loop clock model in scenarios/gate_model.py).
+
 stdlib only.
 """
 
@@ -75,6 +85,9 @@ class RouteResult:
     # match the routed tiles. net -> (x, y). Empty for the internal (no-IO) test path.
     input_pads: Dict[str, Coord] = field(default_factory=dict)
     output_pads: Dict[str, Coord] = field(default_factory=dict)
+    # Clock-distribution source pads after widening (the clock origin tiles), net -> (x, y), for
+    # clock nets that are not themselves primary inputs. Empty when the clock is a primary input.
+    clock_pads: Dict[str, Coord] = field(default_factory=dict)
 
     def coverage(self) -> Tuple[int, int]:
         """(#nets fully routed, #nets total) for reporting."""
@@ -123,12 +136,15 @@ def _widen_placement(placement: Placement, left_pad_demand: int) -> Dict[int, in
     cells = placement.cells
     if not cells:
         return {}
-    col_w = {}                     # column origin x -> footprint width (CELL_W, uniform)
-    col_in = {}                    # column origin x -> total input pins of its cells
+    col_w = {}                     # column origin x -> footprint width (per-column max)
+    col_in = {}                    # column origin x -> total west-edge pins of its cells
     col_out = {}                   # column origin x -> total output pins of its cells
     for c in cells:
         col_w[c.x] = max(col_w.get(c.x, 0), c.w)
-        col_in[c.x] = col_in.get(c.x, 0) + len(c.inputs)
+        # A register's CLOCK pin escapes left too (the clock-distribution riser lands beside
+        # it), so it counts toward the left-channel demand exactly like a data input pin.
+        west_pins = len(c.inputs) + (1 if c.clock is not None else 0)
+        col_in[c.x] = col_in.get(c.x, 0) + west_pins
         col_out[c.x] = col_out.get(c.x, 0) + (1 if c.output is not None else 0)
     old_cols = sorted(col_w)
 
@@ -159,6 +175,8 @@ def _widen_placement(placement: Placement, left_pad_demand: int) -> Dict[int, in
             p.x += dx
         if c.output is not None:
             c.output.x += dx
+        if c.clock is not None:
+            c.clock.x += dx
 
     placement.width_tiles = cursor
     return remap
@@ -166,12 +184,19 @@ def _widen_placement(placement: Placement, left_pad_demand: int) -> Dict[int, in
 
 def _collect_pins(placement: Placement,
                   input_pads: Dict[str, Coord],
-                  output_pads: Dict[str, Coord]) -> List[_Pin]:
-    """Gather every pin (cell pins + IO pads) with the channel side it escapes toward."""
+                  output_pads: Dict[str, Coord],
+                  clock_pads: Dict[str, Coord] | None = None) -> List[_Pin]:
+    """Gather every pin (cell pins + IO pads + clock source pads) with its escape side."""
     pins: List[_Pin] = []
     for pc in placement.cells:
         for ip in pc.inputs:
             pins.append(_Pin(ip.net, ip.x, ip.y, side="left", role="consumer"))
+        # A register's clock pin is a consumer of the clock-distribution net: it escapes left
+        # like a data input, and the clock trunk fans a riser onto it (the clock reaching every
+        # register tile is exactly this set of consumers).
+        if pc.clock is not None:
+            pins.append(_Pin(pc.clock.net, pc.clock.x, pc.clock.y,
+                             side="left", role="clk_sink"))
         if pc.output is not None:
             pins.append(_Pin(pc.output.net, pc.output.x, pc.output.y,
                              side="right", role="driver"))
@@ -179,6 +204,10 @@ def _collect_pins(placement: Placement,
         pins.append(_Pin(net, px, py, side="right", role="pad_in"))
     for net, (px, py) in output_pads.items():
         pins.append(_Pin(net, px, py, side="left", role="pad_out"))
+    # The clock SOURCE pad drives the clock-distribution net (the clock origin tile on the left
+    # edge). It is the single driver of the clock net; every register's clk_sink is fed from it.
+    for net, (px, py) in (clock_pads or {}).items():
+        pins.append(_Pin(net, px, py, side="right", role="pad_clk"))
     return pins
 
 
@@ -263,13 +292,22 @@ def _assign_riser_columns(pins: List[_Pin], cell_tiles: Set[Coord],
 def route_nets(netlist: Netlist, placement: Placement,
                map_w: int, map_h: int,
                input_pads: Dict[str, Coord] | None = None,
-               output_pads: Dict[str, Coord] | None = None) -> RouteResult:
+               output_pads: Dict[str, Coord] | None = None,
+               clock_pads: Dict[str, Coord] | None = None) -> RouteResult:
     """Route every net constructively into trunks + risers with perpendicular bridges.
 
     The placement is x-widened in place first (cells shift right; rows unchanged), so emit.py
     must read placement.cells AFTER this call. input_pads / output_pads are remapped to the
     widened coordinate system and the updated tiles are written back into the dicts the caller
     passed, so emit.py's IOPad list stays consistent with the routed tiles.
+
+    clock_pads maps each clock-distribution net to its CLOCK SOURCE tile on the left edge. The
+    clock net is just another routed net: a single source pad (the clock origin) fanning out to
+    every register's clock pin via the net's unique trunk row. That trunk row IS the clock spine
+    (a single horizontal run carrying the clock the width of the design), and each register's
+    clock riser drops off it onto the register's clock pin, so the clock physically reaches every
+    register tile. It crosses other nets only as legal perpendicular bridges, exactly like data
+    nets, so no special clock-tree machinery is needed beyond naming the source.
 
     Returns a RouteResult whose routes carry the tile path and the bridge tiles (where THIS net
     is carried OVER a perpendicular crossing). Deterministic and complete: every net with a
@@ -284,22 +322,27 @@ def route_nets(netlist: Netlist, placement: Placement,
     """
     input_pads = dict(input_pads or {})
     output_pads = dict(output_pads or {})
+    clock_pads = dict(clock_pads or {})
 
-    # 1. Widen the placement so every channel has a track per riser. Input pads sit on the left
-    #    edge (x = 0) and need left-margin tracks too, hence left_pad_demand.
-    remap = _widen_placement(placement, left_pad_demand=len(input_pads))
+    # 1. Widen the placement so every channel has a track per riser. Input pads AND clock source
+    #    pads sit on the left edge (x = 0) and need left-margin tracks too, hence left_pad_demand.
+    remap = _widen_placement(placement,
+                             left_pad_demand=len(input_pads) + len(clock_pads))
 
-    # 2. Remap IO pads into the widened coordinates. Input pads stay at x = 0 (left edge);
-    #    output pads move to just past the widened logic so they keep their right-edge role.
+    # 2. Remap IO pads into the widened coordinates. Input pads and clock source pads stay at
+    #    x = 0 (left edge); output pads move to just past the widened logic.
     new_right_x = placement.width_tiles + 1
     for net in list(input_pads):
         x, y = input_pads[net]
         input_pads[net] = (0, y)
+    for net in list(clock_pads):
+        x, y = clock_pads[net]
+        clock_pads[net] = (0, y)
     for j, net in enumerate(list(output_pads)):
         x, y = output_pads[net]
         output_pads[net] = (new_right_x, y)
 
-    all_pins = _collect_pins(placement, input_pads, output_pads)
+    all_pins = _collect_pins(placement, input_pads, output_pads, clock_pads)
     pins_by_net: Dict[str, List[int]] = {}
     for i, p in enumerate(all_pins):
         pins_by_net.setdefault(p.net, []).append(i)
@@ -307,7 +350,7 @@ def route_nets(netlist: Netlist, placement: Placement,
     sources: Dict[str, int] = {}
     for net, idxs in pins_by_net.items():
         for i in idxs:
-            if all_pins[i].role in ("driver", "pad_in"):
+            if all_pins[i].role in ("driver", "pad_in", "pad_clk"):
                 sources[net] = i
                 break
 
@@ -338,7 +381,8 @@ def route_nets(netlist: Netlist, placement: Placement,
 
     for net in nets_ordered:
         idxs = pins_by_net[net]
-        consumers = [i for i in idxs if all_pins[i].role in ("consumer", "pad_out")]
+        consumers = [i for i in idxs
+                     if all_pins[i].role in ("consumer", "pad_out", "clk_sink")]
         src = sources.get(net)
         if src is None:
             tgt = ((all_pins[consumers[0]].x, all_pins[consumers[0]].y)
@@ -375,9 +419,10 @@ def route_nets(netlist: Netlist, placement: Placement,
     _assign_bridges(result)
     result.width_tiles = used_w
     result.height_tiles = used_h
-    # Hand the remapped IO pad tiles back so the caller's IOPad list matches the routes.
+    # Hand the remapped IO + clock pad tiles back so the caller's IOPad list matches the routes.
     result.input_pads = input_pads
     result.output_pads = output_pads
+    result.clock_pads = clock_pads
     return result
 
 

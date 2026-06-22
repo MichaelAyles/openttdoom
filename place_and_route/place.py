@@ -45,6 +45,23 @@ Pin convention (on the footprint boundary):
     tiles, so each input net occupies its own distinct tile.
   - the single output leaves on the RIGHT edge, middle tile (x == cell.x + w - 1).
 
+Registers (sequential designs)
+------------------------------
+A DFF cell is a clocked REGISTER TILE: a master-slave NOR latch, so its footprint
+(REG_W x REG_H) is bigger than a combinational NOR. It has the usual data pin(s) D on the
+west edge and a Q output on the east edge, PLUS a dedicated CLOCK pin on the west edge (on
+its own row, off the data pins, so the clock-distribution net never shorts onto data). The
+clock net is carried on Cell.clock (not in Cell.inputs), exactly mirroring the netlist, and
+the router fans it from one source out to every register's clock pin (the clock spine).
+
+A register is a TIMING BOUNDARY for the level assignment: a cell reading a register's Q does
+not chain its column through the register (Q is held state, a level-0 source), which is what
+makes a SEQUENTIAL netlist with feedback through a register (a counter, a toggle flip-flop)
+placeable instead of looking like a combinational loop. The exact in-tile track geometry of
+the register is the open research problem (TODO(human), STUCK.md); REG_W/REG_H are an honest
+footprint reservation, the same way the combinational NOR footprint was reserved before its
+geometry was solved in game. Placement and routing only need the extent and the pin tiles.
+
 stdlib only. Imports the shared netlist + scenario contracts, does not modify them.
 """
 
@@ -72,6 +89,21 @@ CELL_H = 3
 # scenarios/computecell_gs/main.nut.
 LANE_DY = 1          # lane row = cell.y + LANE_DY (feeder depots on cell.y)
 FIRST_TAP_DX = 8     # first input tap at cell.x + FIRST_TAP_DX
+
+# REGISTER (DFF) tile footprint. A clocked register is a master-slave pair of cross-coupled
+# NOR latches (see netlist.NetlistBuilder.dff_nor), so its physical tile is BIGGER than a
+# single combinational NOR: two gated latches plus the clock-gating inverter and the
+# clock-distribution tap. We do not yet have the verified track geometry for that tile in
+# OpenTTD (the single combinational NOR is the only gate proven in game, see STUCK.md #1), so
+# REG_W/REG_H are a HONEST RESERVATION: a footprint large enough to hold the master-slave latch
+# the lowering implies, with three distinct west-edge pins (D data, CLOCK, and a clear margin
+# row) and a Q output on the east edge. The exact in-tile track layout of the register is
+# TODO(human) and tracked in STUCK.md; placement and routing only need the footprint extent and
+# the pin tiles, both of which are pinned here, so the toolchain closes around the reservation
+# the same way it closed around the combinational NOR before that geometry was solved.
+REG_W = 16           # wider than CELL_W (14): master + slave latch span plus the clock tap
+REG_H = 4            # taller than CELL_H (3): D row, CLOCK row, Q lane, margin row
+REG_CLOCK_DY = 2     # clock pin on the west edge, one row below the D data pin
 
 # Kept for backward compatibility with _cell_height's old margin maths (unused by the real
 # fixed-height footprint, but referenced below).
@@ -115,11 +147,25 @@ def logic_levels(netlist: Netlist) -> Dict[str, int]:
     """Assign each cell a topological level. Level = longest path from a primary input.
 
     A cell's level is 1 + max(level of cells driving its inputs); cells fed only by
-    primary inputs (or constants, which have no inputs) sit at level 0. Raises on a
-    combinational loop, matching netlist.simulate's contract (M4 substrate is acyclic).
+    primary inputs (or constants, which have no inputs) sit at level 0.
+
+    Registers (DFF cells) are TIMING BOUNDARIES, not combinational links. A register output Q
+    is held state, available at the START of every clock cycle just like a primary input, so a
+    cell that READS a register's Q does NOT chain its level through the register: Q is treated
+    as a level-0 source. This is what makes a SEQUENTIAL netlist placeable: a feedback loop that
+    is broken by a register (e.g. a toggle flip-flop q = DFF(NOT q, clk), or any counter that
+    feeds its own next-state back through a register) is acyclic ONCE the register edge is cut,
+    so it gets sensible columns instead of raising "combinational loop". A purely COMBINATIONAL
+    loop (no register on the cycle) still raises, exactly as before, since that is a real design
+    error the M4 substrate cannot build. A register's OWN level is computed from its data input D
+    so the register tile sits in a column to the right of the logic that feeds it.
     """
     drivers = netlist.driver_of()
     primary = set(netlist.ports.inputs)
+    # Nets driven by a register output: these are timing boundaries, level-0 sources for any
+    # consumer, so the recursion never crosses a register edge (and feedback through a register
+    # does not look like a combinational loop).
+    register_outputs = {c.output for c in netlist.cells if c.is_sequential()}
     level: Dict[str, int] = {}
 
     def cell_level(cell: Cell, stack: set) -> int:
@@ -130,7 +176,8 @@ def logic_levels(netlist: Netlist) -> Dict[str, int]:
         stack.add(cell.id)
         lvl = 0
         for src in cell.inputs:
-            if src in primary:
+            if src in primary or src in register_outputs:
+                # primary input or a register output: a level-0 timing-boundary source.
                 continue
             drv = drivers.get(src)
             if drv is None:
@@ -199,6 +246,40 @@ def _output_pin_offset(h: int, n: int = 2) -> tuple:
     return (11 + max(1, n), LANE_DY)
 
 
+# --- register (DFF) tile footprint -------------------------------------------------
+
+def _register_input_pin_offsets(n: int) -> List[tuple]:
+    """West-edge data (D) pin offsets for a register tile, one row per data input.
+
+    A DFF has exactly one data input D, but we size generally: the data pins sit on the top
+    west-edge rows (row LANE_DY upward), kept clear of the clock pin's row (REG_CLOCK_DY). The
+    register's D enters here exactly as a combinational cell's input does, on its own tile.
+    """
+    if n <= 0:
+        return []
+    return [(0, LANE_DY + i) for i in range(n)]
+
+
+def _register_clock_pin_offset() -> tuple:
+    """West-edge CLOCK pin offset for a register tile.
+
+    The clock arrives on its OWN west-edge tile, below the data pin(s), so the clock-distribution
+    net never shares a tile with the register's data net (that would short the clock onto the
+    data). The clock-distribution trunk drops a riser onto this tile for every register, which is
+    the clock spine reaching every clock pin.
+    """
+    return (0, REG_CLOCK_DY)
+
+
+def _register_output_pin_offset() -> tuple:
+    """East-edge Q output pin offset for a register tile.
+
+    Q (the held register value) leaves on the east edge, lane row, opposite the west-edge data
+    and clock pins, so it never collides with them. Downstream cells read this cell's Q here.
+    """
+    return (REG_W - 1, LANE_DY)
+
+
 def _channel_demand(netlist: Netlist, levels: Dict[str, int]) -> int:
     """Max number of nets that must cross any single column boundary.
 
@@ -209,19 +290,32 @@ def _channel_demand(netlist: Netlist, levels: Dict[str, int]) -> int:
     treated as driven from the left margin (level -1).
     """
     primary = set(netlist.ports.inputs)
-    # net -> driver column
+    # net -> driver column. A register output is held state available from the left, so like a
+    # primary input it is sourced at level -1 (not at the register's own column): a consumer of
+    # Q may sit in ANY column, even left of the register, so its crossing span must start from
+    # the left margin.
+    register_outputs = {c.output for c in netlist.cells if c.is_sequential()}
     src_col: Dict[str, int] = {}
     for c in netlist.cells:
-        src_col[c.output] = levels[c.id]
+        src_col[c.output] = -1 if c.is_sequential() else levels[c.id]
     for n in primary:
         src_col[n] = -1
-    # net -> furthest consumer column
+    # The clock-distribution net is sourced from the left margin too (the clock origin pad).
+    clocks = netlist.clocks()
+    for clk in clocks:
+        src_col.setdefault(clk, -1)
+    # net -> furthest consumer column. A register's clock pin consumes the clock net at the
+    # register's column, so the clock net spans the left margin out to the rightmost register.
     far_col: Dict[str, int] = {}
     for c in netlist.cells:
         for src in c.inputs:
             lvl = levels[c.id]
             if src not in far_col or lvl > far_col[src]:
                 far_col[src] = lvl
+        if c.clock is not None:
+            lvl = levels[c.id]
+            if c.clock not in far_col or lvl > far_col[c.clock]:
+                far_col[c.clock] = lvl
     counts: Dict[int, int] = {}
     for net, sc in src_col.items():
         fc = far_col.get(net)
@@ -258,7 +352,12 @@ def place_cells(netlist: Netlist) -> Placement:
     # narrow gap cannot carry more nets than it has tiles.
     demand = _channel_demand(netlist, levels)
     col_gap = max(COL_GAP, demand + CHANNEL_SLACK)
-    col_stride = CELL_W + col_gap
+    # Column stride must clear the WIDEST footprint a column can hold. Registers (REG_W) are
+    # wider than a combinational NOR (CELL_W), so a column with a register needs the bigger
+    # stride or the next column would overlap it. (The channel router re-spaces columns exactly
+    # to per-column width afterwards; this keeps the pre-routing placement legal too.)
+    widest = REG_W if netlist.is_sequential() else CELL_W
+    col_stride = widest + col_gap
     # Cells can have different heights (a wide NOR is taller, see _cell_height), so rows are
     # packed by a running y cursor per column rather than a fixed row stride: each cell starts
     # ROW_GAP below the bottom of the cell above it. Footprint heights vary by fan-in.
@@ -297,17 +396,33 @@ def place_cells(netlist: Netlist) -> Placement:
         cy = TOP_MARGIN
         for row, c in enumerate(ordered):
             n_in = len(c.inputs)
-            ch = _cell_height(n_in)
-            cw = _cell_width(n_in)
             cell_row[c.id] = row
-            in_pins = []
-            for (dx, dy), net in zip(_input_pin_offsets(n_in, ch), c.inputs):
-                in_pins.append(Pin(net=net, x=cx + dx, y=cy + dy))
-            odx, ody = _output_pin_offset(ch, n_in)
-            out_pin = Pin(net=c.output, x=cx + odx, y=cy + ody)
-            pc = PlacedCell(
-                id=c.id, type=c.type, x=cx, y=cy, w=cw, h=ch,
-                inputs=in_pins, output=out_pin)
+            if c.is_sequential():
+                # Register tile: bigger footprint, a clock pin on the west edge in addition to
+                # the data pin(s), and a Q output on the east edge. The clock pin carries the
+                # clock-distribution net (c.clock), kept on a distinct row from the data pins.
+                ch, cw = REG_H, REG_W
+                in_pins = []
+                for (dx, dy), net in zip(_register_input_pin_offsets(n_in), c.inputs):
+                    in_pins.append(Pin(net=net, x=cx + dx, y=cy + dy))
+                cdx, cdy = _register_clock_pin_offset()
+                clk_pin = Pin(net=c.clock, x=cx + cdx, y=cy + cdy)
+                odx, ody = _register_output_pin_offset()
+                out_pin = Pin(net=c.output, x=cx + odx, y=cy + ody)
+                pc = PlacedCell(
+                    id=c.id, type=c.type, x=cx, y=cy, w=cw, h=ch,
+                    inputs=in_pins, output=out_pin, clock=clk_pin, reset=c.reset)
+            else:
+                ch = _cell_height(n_in)
+                cw = _cell_width(n_in)
+                in_pins = []
+                for (dx, dy), net in zip(_input_pin_offsets(n_in, ch), c.inputs):
+                    in_pins.append(Pin(net=net, x=cx + dx, y=cy + dy))
+                odx, ody = _output_pin_offset(ch, n_in)
+                out_pin = Pin(net=c.output, x=cx + odx, y=cy + ody)
+                pc = PlacedCell(
+                    id=c.id, type=c.type, x=cx, y=cy, w=cw, h=ch,
+                    inputs=in_pins, output=out_pin)
             placed.append(pc)
             by_id[c.id] = pc
             max_x = max(max_x, cx + cw)

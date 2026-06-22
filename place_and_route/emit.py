@@ -73,18 +73,32 @@ def build_scenario(netlist: Netlist, name: str | None = None) -> tuple:
     for j, port in enumerate(netlist.ports.outputs):
         out_pads[port] = (placement.width_tiles + 1, j)
 
+    # Clock-distribution source pads: every clock net that is NOT already a primary input pad
+    # gets its own left-edge source (the clock origin). A clock that IS a primary input (the
+    # common case, e.g. "clk") is sourced from its input pad, and the router fans it out to every
+    # register's clock pin via that net's trunk row (the clock spine). Either way the clock net
+    # reaches every register tile.
+    clk_pads: Dict[str, tuple] = {}
+    primary = set(netlist.ports.inputs)
+    for k, clk in enumerate(netlist.clocks()):
+        if clk not in primary:
+            clk_pads[clk] = (0, len(in_pads) + k)
+
     rr: RouteResult = route_nets(netlist, placement, placement.width_tiles + 1,
                                  placement.height_tiles,
-                                 input_pads=in_pads, output_pads=out_pads)
+                                 input_pads=in_pads, output_pads=out_pads,
+                                 clock_pads=clk_pads)
 
     # Final pad tiles come back from the router (widened coordinates).
     input_pads = rr.input_pads or in_pads
     output_pads = rr.output_pads or out_pads
+    clock_pads = rr.clock_pads or clk_pads
 
     # Size the map to cover everything the router used (logic, risers, trunk band, pads).
     need_w = max(rr.width_tiles, placement.width_tiles) + RIGHT_MARGIN
     need_h = max(rr.height_tiles, placement.height_tiles) + BOTTOM_MARGIN
-    for (px, py) in list(input_pads.values()) + list(output_pads.values()):
+    for (px, py) in (list(input_pads.values()) + list(output_pads.values())
+                     + list(clock_pads.values())):
         need_w = max(need_w, px + 1 + RIGHT_MARGIN)
         need_h = max(need_h, py + 1 + BOTTOM_MARGIN)
     map_w, map_h = _pow2_at_least(need_w), _pow2_at_least(need_h)
@@ -100,6 +114,10 @@ def build_scenario(netlist: Netlist, name: str | None = None) -> tuple:
         io.append(IOPad(port=port, net=port, x=px, y=py, kind="output"))
         fb_pixels.append(port)
         out_x = px
+    # Clock source pads that are NOT primary inputs get a "clock" IO pad recording the clock
+    # origin tile, so the scenario carries where the clock-distribution net starts.
+    for net, (px, py) in clock_pads.items():
+        io.append(IOPad(port=net, net=net, x=px, y=py, kind="clock"))
 
     framebuffer = None
     if fb_pixels:
@@ -109,10 +127,20 @@ def build_scenario(netlist: Netlist, name: str | None = None) -> tuple:
             origin_x=out_x, origin_y=fb_y0, w=1, h=len(fb_pixels),
             pixel_nets=fb_pixels)
 
+    # Clock origin: where the clock-distribution net is sourced. Prefer an explicit clock source
+    # pad; else, if a clock net is a primary input (the usual "clk"), use that input pad's tile;
+    # else fall back to the bottom-left corner. This pins the spine's start tile honestly.
+    clk_origin = (0, map_h - 1)
+    clocks = netlist.clocks()
+    if clock_pads:
+        clk_origin = next(iter(clock_pads.values()))
+    elif clocks and clocks[0] in input_pads:
+        clk_origin = input_pads[clocks[0]]
+
     scen = Scenario(
         name=name or netlist.name,
         map_x=map_w, map_y=map_h,
-        clock=Clock(period_ticks=8, origin_x=0, origin_y=map_h - 1),
+        clock=Clock(period_ticks=8, origin_x=clk_origin[0], origin_y=clk_origin[1]),
         cells=placement.cells,
         routes=rr.routes,
         io=io,
@@ -129,10 +157,14 @@ def _cli(argv: List[str]) -> int:
     in_path, out_path = argv[1], argv[2]
     netlist = Netlist.load(in_path)
 
-    # Place-and-route operates on the buildable {NOR, CONST0, CONST1} set. If the input
-    # netlist still has high-level gates, lower it first so placement only sees buildables.
-    if any(c.type not in ("NOR", "CONST0", "CONST1") for c in netlist.cells):
-        netlist = netlist.to_nor()
+    # Place-and-route operates on the buildable {NOR, CONST0, CONST1} set, plus DFF register
+    # tiles for a sequential design. If the input netlist still has high-level gates, lower it
+    # first so placement only sees buildables. A sequential netlist (with DFFs) is lowered with
+    # keep_registers=True, so its combinational logic becomes NOR while each register stays one
+    # placeable register tile (and the clock-distribution net reaches every such tile).
+    buildable = {"NOR", "CONST0", "CONST1", "DFF"}
+    if any(c.type not in buildable for c in netlist.cells):
+        netlist = netlist.to_nor(keep_registers=netlist.is_sequential())
 
     scen, rr = build_scenario(netlist)
     scen.save(out_path)

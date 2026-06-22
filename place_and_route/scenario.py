@@ -33,17 +33,28 @@ class Pin:
 @dataclass
 class PlacedCell:
     id: str
-    type: str                 # NOR / CONST0 / CONST1 (buildable set)
+    type: str                 # NOR / CONST0 / CONST1 (buildable set), or DFF (register tile)
     x: int                    # footprint origin
     y: int
     w: int
     h: int
     inputs: List[Pin] = field(default_factory=list)
     output: Optional[Pin] = None
+    # Register-only fields. A DFF (clocked register) tile carries its clock net on a dedicated
+    # CLOCK pin (kept off the data `inputs` so the data fan-in stays a clean one-element list,
+    # exactly mirroring Cell.clock in the netlist), plus the reset value the register holds
+    # before its first capturing edge. Both default so combinational cells and pre-register
+    # scenario JSON (no clock/reset keys) still load unchanged.
+    clock: Optional[Pin] = None
+    reset: int = 0
 
     def occupied(self) -> List[Coord]:
         return [(self.x + dx, self.y + dy)
                 for dx in range(self.w) for dy in range(self.h)]
+
+    def is_register(self) -> bool:
+        """True iff this is a clocked register tile (carries a clock pin)."""
+        return self.clock is not None
 
 
 @dataclass
@@ -125,9 +136,12 @@ class Scenario:
         for c in d.get("cells", []):
             ins = [Pin(**p) for p in c.get("inputs", [])]
             out = Pin(**c["output"]) if c.get("output") else None
+            # Register tiles carry a clock pin and a reset value; both default for old JSON.
+            clk = Pin(**c["clock"]) if c.get("clock") else None
             cells.append(PlacedCell(
                 id=c["id"], type=c["type"], x=c["x"], y=c["y"],
-                w=c["w"], h=c["h"], inputs=ins, output=out))
+                w=c["w"], h=c["h"], inputs=ins, output=out,
+                clock=clk, reset=c.get("reset", 0)))
         routes = [Route(net=r["net"], path=[tuple(t) for t in r.get("path", [])],
                         bridges=[tuple(t) for t in r.get("bridges", [])])
                   for r in d.get("routes", [])]
@@ -165,9 +179,12 @@ class Scenario:
             ins = arr([f"{{net=\"{p.net}\", x={p.x}, y={p.y}}}" for p in c.inputs])
             out = ("null" if c.output is None
                    else f"{{net=\"{c.output.net}\", x={c.output.x}, y={c.output.y}}}")
+            clk = ("null" if c.clock is None
+                   else f"{{net=\"{c.clock.net}\", x={c.clock.x}, y={c.clock.y}}}")
             cell_strs.append(
                 f'{{id="{c.id}", type="{c.type}", x={c.x}, y={c.y}, '
-                f"w={c.w}, h={c.h}, inputs={ins}, output={out}}}")
+                f"w={c.w}, h={c.h}, inputs={ins}, output={out}, "
+                f"clock={clk}, reset={c.reset}}}")
         lines.append("    cells = " + arr(cell_strs) + ",")
         route_strs = []
         for r in self.routes:

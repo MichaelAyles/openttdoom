@@ -290,3 +290,38 @@ data layout: the exe needs `lang/`, `baseset/`, `ai/`, `game/` alongside it, or 
 Consequence: the OpenTTD speed fork (stripped tick loop, uncapped speed) is NO LONGER environment
 -blocked. It is still real work (modify the engine source, rebuild), but the toolchain to do it is
 present and proven.
+
+## 7. The physical OpenTTD REGISTER TILE geometry. The footprint is RESERVED; the in-tile track is open.
+
+The place-and-route backend now handles CLOCKED designs: a DFF is placed as a register tile and the
+clock-distribution net is routed to every register (toggle flip-flop, shift register, 3-bit counter
+all place + route to 100 percent of nets, 0 DRC violations, clock reaching every register, and the
+emitted scenario reconstructs to a cycle-for-cycle-equivalent sequential netlist with an equivalent
+combinational cone). See STATUS.md (M3 extension) and `place_and_route/test_pnr_register.py`.
+
+What is RESERVED, not yet solved: the exact tile-by-tile track and signal geometry of the register
+tile itself, i.e. the physical master-slave NOR latch (`netlist.NetlistBuilder.dff_nor`: two gated
+cross-coupled-NOR D-latches plus the clock-gating inverter) realised in OpenTTD track, with the clock
+train's edge gating the capture. `place.REG_W` (16) x `REG_H` (4) is an honest footprint reservation
+big enough to hold that structure, with three distinct west-edge pins (D data, CLOCK, margin) and a Q
+output on the east edge. This is the SAME situation the combinational NOR tile was in before its
+geometry was proven in game (blocker 1): the toolchain closes fully around the reservation, and only
+the in-game stamp geometry is open.
+
+What the human has to build (all the pieces exist to build it on):
+  - A track-signal master-slave register that captures D on the clock edge and presents it for the
+    next period. The combinational NOR tile is proven (`scenarios/norgate_gs/`), gate composition is
+    proven (`scenarios/norchain_gs/`), and a GS-mediated clock-synchronised sample is proven
+    (`scenarios/clockgate_gs/main_clocked.nut`); what remains is the PURE one-edge OUTPUT REGISTER,
+    which is also exactly the open item under blocker 1 (the reservation-coupling obstacle in
+    `scenarios/syncgate_gs/`). So the register tile and the clocked-element work are the SAME blocker
+    seen from the toolchain side.
+  - Once the register tile geometry is known, fold it into the emitter the way the NOR tile was folded
+    into `scenarios/computecell_gs/` (SC1), stamping the register at `cell.x`/`cell.y` plus a fixed
+    footprint offset, and tap the clock-distribution net (already routed as a spine to every register's
+    clock pin) onto the register's clock input.
+
+Concrete next step: solve the one-edge output register in game (blocker 1's open item), then freeze
+its footprint into `place.REG_W`/`REG_H` and its pin offsets into `place._register_*_pin_offset`, the
+same swap-in-the-real-footprint move that closed the combinational NOR. The placement, routing, clock
+distribution, DRC and reconstruction are already done and verified in software.
