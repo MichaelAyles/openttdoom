@@ -261,16 +261,18 @@ framebuffers.
 
 *Two raycaster frames rendered by the ROM in the golden interpreter.*
 
-It is also **playable**: `python golden/play.py` opens a window and walks the camera through
-the maze with WASD/arrows. Every frame is the real raycaster ROM executed in the golden
-interpreter (verified bit-identical to the reference oracle), only the camera loop lives in
-Python, since the current ROM bakes the viewpoint in and takes no input. A self-contained
-interactive ROM is the natural follow-on.
+It is also **playable**: `python golden/play.py` opens a window and walks you through the maze
+with WASD/arrows (Shift to sprint). The main view is a smooth shaded raycaster with floor,
+ceiling, distance shading and a minimap so the maze is actually navigable, and the inset in the
+corner is the REAL 1-bit 64x32 CHIP-8 output for your current view (the proven golden model,
+bit-identical to the ROM bytes), so you always see exactly what the train machine would compute.
+The big view is just a comfortable lens on the same world. A self-contained interactive ROM
+(movement done inside CHIP-8) is the natural follow-on.
 
 ![Raycaster walkthrough](out_screens/raycaster_walkthrough.gif)
 
-*An auto-piloted walkthrough: a 360 look-around then a corridor walk, every frame the real
-CHIP-8 raycaster ROM.*
+*An auto-piloted walkthrough of the maze. The corner inset is the real 1-bit CHIP-8 framebuffer,
+the comfortable shaded view is the navigation lens on the same map.*
 
 ![CHIP-8 IBM logo render](golden/out/ibm.png)
 
