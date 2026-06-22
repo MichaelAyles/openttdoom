@@ -175,3 +175,100 @@ def test_render_frames_to_png(tmp_path):
         out = tmp_path / f"ray_{heading}.png"
         viewer.save_png(m, str(out))
         assert out.exists() and out.stat().st_size > 0
+
+
+# --- (d) the enhanced 1-bit oracle (render_reference_hi) --------------------
+# A SEPARATE contract from the plain renderer above. render_reference_hi is the
+# gorgeous-within-1-bit target the eventual hardware FSM must reproduce bit for
+# bit. The plain render_reference / build_rom contract is unchanged and still
+# checked above; nothing here touches it. These tests pin the enhanced oracle's
+# exact frames (a few headings, both resolutions) by sha256, and prove it is a
+# pure deterministic function so it can be the bit-exact reference.
+
+import hashlib
+
+
+def _hi_hash(frame) -> str:
+    return hashlib.sha256(frame.tobytes()).hexdigest()
+
+
+def test_hi_resolutions_have_expected_shapes():
+    # both resolutions are supported: 64x32 (the signal panel) and 96x48.
+    lo = rc.render_reference_hi(0, res="lo")
+    hi = rc.render_reference_hi(0, res="hi")
+    assert lo.shape == (32, 64)
+    assert hi.shape == (48, 96)
+    assert lo.dtype == np.uint8 and hi.dtype == np.uint8
+    # binary framebuffer: every pixel is 0 or 1, this is a 1-bit panel.
+    assert set(np.unique(lo)).issubset({0, 1})
+    assert set(np.unique(hi)).issubset({0, 1})
+
+
+@pytest.mark.parametrize("res", ["lo", "hi"])
+@pytest.mark.parametrize("heading", [0, 7, 12, 24])
+def test_hi_is_deterministic(res, heading):
+    # same inputs -> identical framebuffer and identical hash. the oracle reads no
+    # input and uses no RNG, so this must hold exactly. it is the property the FSM
+    # is later checked against.
+    a = rc.render_reference_hi(heading, res=res)
+    b = rc.render_reference_hi(heading, res=res)
+    assert np.array_equal(a, b)
+    assert _hi_hash(a) == _hi_hash(b)
+
+
+def test_hi_texture_changes_the_frame():
+    # the vertical wall texture LUT must actually be wired in: toggling it changes
+    # the rendered wall pixels (otherwise it is dead decoration, not a feature).
+    on = rc.render_reference_hi(7, res="lo", texture=True)
+    off = rc.render_reference_hi(7, res="lo", texture=False)
+    assert not np.array_equal(on, off)
+
+
+def test_hi_frames_change_as_player_turns():
+    # turning must change the enhanced view too; adjacent depth-rich headings must
+    # not collapse to identical frames.
+    frames = [rc.render_reference_hi(h, res="lo") for h in (0, 4, 8, 12, 16)]
+    hashes = {f.tobytes() for f in frames}
+    assert len(hashes) == len(frames), "some headings rendered identical hi frames"
+
+
+def test_hi_has_dithered_floor_and_ceiling():
+    # the floor and ceiling fills must produce lit pixels in their regions (not a
+    # void), so the slab floats inside a room. check a heading whose centre column
+    # has a finite-height slice with floor below and ceiling above.
+    f = rc.render_reference_hi(7, res="lo")
+    h, w = f.shape
+    # bottom quarter (floor band) and top region should both carry dither pixels
+    # somewhere across the frame.
+    assert int(f[3 * h // 4 :, :].sum()) > 0, "no floor dither"
+    assert int(f[: h // 4, :].sum()) > 0, "no ceiling dither"
+
+
+# pinned enhanced-oracle frames: exact fingerprints captured from the verified
+# pure renderer. These FREEZE the gorgeous 1-bit target. The hardware FSM in the
+# next deliverable is required to reproduce these byte for byte, so a change to
+# the enhanced renderer math that alters any frame fails loudly here. Regenerate
+# intentionally (only on a deliberate design change) with the helper at the foot
+# of raycaster's render path.
+PINNED_HI = {
+    # (res, heading): (lit pixels, sha256 of frame.tobytes())
+    ("lo", 0): (429, "c1ebac5f947929b5d52d64cfc22cff49e17b93b7f1a9501395e3f796bd4448b5"),
+    ("lo", 7): (402, "35a2e64af3c12bcd5d0faeef91124eff248bd10bfc4458b40d2964401a3db1b3"),
+    ("lo", 12): (847, "cb7184f52060200315e505301a9059fd694fa49dbe679000eff84824e16cdd0f"),
+    ("lo", 24): (1057, "837028140e77a326f632e87246ac075d3bd693bb226a176c643e37db2869801b"),
+    ("hi", 0): (982, "8dc9111514fadfe702158f4c24556bd34216616eca3dc2e7dc67f5b1c332a9e4"),
+    ("hi", 7): (995, "7b26e638137885c4fd5b355979de5289cec1727dc10401043234a57ab86d0291"),
+    ("hi", 12): (1983, "e20207a86f958e1683a6a579fc326c8fe86a41ca5d737effd7e96537b612a51d"),
+    ("hi", 24): (2459, "54f3f95826c7f02cea803be44b97716f9baa340c13cc24e36cc4fd0c4d7b5138"),
+}
+
+
+@pytest.mark.parametrize("key,want", list(PINNED_HI.items()))
+def test_hi_frame_pinned(key, want):
+    res, heading = key
+    want_lit, want_hash = want
+    f = rc.render_reference_hi(heading, res=res)
+    lit = int(f.sum())
+    assert lit == want_lit, f"{res} h{heading} lit {lit}, expected {want_lit}"
+    got = _hi_hash(f)
+    assert got == want_hash, f"{res} h{heading} hash {got}, expected {want_hash}"

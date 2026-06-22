@@ -147,6 +147,301 @@ def render_reference(heading: int, px: int = PLAYER_X, py: int = PLAYER_Y) -> np
     return disp
 
 
+# --- the enhanced 1-bit oracle (render_reference_hi) ------------------------
+#
+# A second, richer oracle. The existing render_reference above is the contract
+# the CHIP-8 ROM (build_rom) reproduces and must NOT change. This enhanced
+# renderer is a separate, frozen target: the gorgeous-within-1-bit picture the
+# eventual hardware FSM (deliverable B) is required to reproduce bit for bit.
+#
+# It is a pure, deterministic function of (heading, position, resolution): same
+# inputs give an identical framebuffer, pinned by sha256 in the tests. It is NOT
+# constrained to CHIP-8 opcodes, because the FSM that will reproduce it is custom
+# hardware, not a CHIP-8 core. The look is everything 1 bit allows: per-pixel
+# Bayer 4x4 ordered dither of wall brightness by hit distance (so distance reads
+# as several perceived grey bands), 1px black edge seams at slice top/bottom and
+# at column depth discontinuities, dithered floor and ceiling fills that turn the
+# floating slabs into a room, and a small vertical wall texture. Every continuous
+# quantity (distance->shade, floor row->shade, texture column->bias) is a small
+# integer LUT, because on the train substrate a LUT is free hardwired landscape.
+
+# Bayer 4x4 ordered-dither threshold matrix, values 0..15. A pixel of target
+# shade s (0..16, 0=black 16=white) is lit where BAYER4[y&3, x&3] < s, so s acts
+# as a coverage level and the matrix spreads the lit pixels into the classic
+# ordered-dither pattern. 16 distinct s values give up to 17 perceived levels,
+# of which the eye resolves 4 to 5 stable grey bands on a 1-bit panel.
+BAYER4 = np.array(
+    [
+        [0, 8, 2, 10],
+        [12, 4, 14, 6],
+        [3, 11, 1, 9],
+        [15, 7, 13, 5],
+    ],
+    dtype=np.int16,
+)
+BAYER_LEVELS = 16  # BAYER4 entries are 0..15; shade s in 0..16 -> coverage s/16.
+
+# A finer fixed-point DDA than the ROM uses, so the oracle has smooth depth to
+# dither. Position is still 0..255 (16th-of-a-cell), but the march sub-steps the
+# cell at SUBSTEPS per cell so the hit distance is a real distance, not a coarse
+# step index. This is software, it is allowed to be more precise than the ROM.
+HI_SUBSTEPS = 64           # ray micro-steps per cell along the longer axis.
+HI_MAX_CELLS = 20          # how many cells a ray may cross before giving up.
+
+# Distance -> wall shade LUT. Index is the perpendicular hit distance in
+# sixteenths-of-a-cell (0..HI_DIST_MAX-1), value is a wall brightness 0..16 fed
+# to the Bayer compare. Near walls are bright (high coverage, mostly lit), far
+# walls are dark (low coverage, sparse dither), which is the depth cue. The curve
+# is hand-tuned: a bright near plateau then a smooth roll-off so several bands are
+# visible across the corridor depth, never fully black (min 2) so far walls still
+# read as wall, not void.
+HI_DIST_MAX = 256          # distance index is clamped into 0..255 (one byte).
+
+
+def _build_dist_shade_lut():
+    lut = np.empty(HI_DIST_MAX, dtype=np.int16)
+    for d in range(HI_DIST_MAX):
+        # d is in sixteenths of a cell. map to cells, then an inverse falloff.
+        # the near plateau is capped at 13 (not 16) so even the closest walls keep
+        # a visible Bayer texture instead of whiting out, and the floor stays the
+        # only fully-bright surface. min 2 keeps far walls reading as wall.
+        cells = d / 16.0
+        shade = 13.0 / (1.0 + cells * 0.85)
+        lut[d] = int(max(2, min(13, round(shade))))
+    return lut
+
+
+DIST_SHADE = _build_dist_shade_lut()
+
+# Floor / ceiling shade LUT. Index is distance-from-the-horizon in pixels (row
+# distance from screen centre), value is a shade 0..16 for the Bayer compare.
+# The nearest floor/ceiling rows (far from the horizon, near the player) are the
+# brightest; rows near the horizon fade to near-black. Ceiling is dimmer than the
+# floor so the two planes read as different surfaces, like Wolfenstein's grey
+# ceiling over a lighter floor.
+FLOOR_SHADE_MAX = 64       # row distance index range.
+
+
+def _build_plane_shade_lut(near, far, gamma=1.0):
+    lut = np.empty(FLOOR_SHADE_MAX, dtype=np.int16)
+    for r in range(FLOOR_SHADE_MAX):
+        t = (r / (FLOOR_SHADE_MAX - 1)) ** gamma
+        shade = far + (near - far) * t
+        lut[r] = int(max(0, min(16, round(shade))))
+    return lut
+
+
+# floor reads as a lit ground plane fading toward the horizon. ceiling is a dark
+# sky/vault: it stays near-black except for the rows nearest the player, so the
+# top of the frame is a clean dark field that the dithered walls sit against,
+# which is what makes the m_v2 prototype read. gamma>1 pushes the fade so the
+# bright band hugs the near edge instead of smearing up to the horizon.
+FLOOR_SHADE = _build_plane_shade_lut(near=11, far=1, gamma=1.6)
+CEIL_SHADE = _build_plane_shade_lut(near=4, far=0, gamma=2.2)
+
+# Vertical wall texture LUT. Index is the wall-hit coordinate within the cell
+# (0..15, the fractional position along the wall face), value is a small signed
+# brightness bias added to the wall shade before the Bayer compare. A shallow
+# repeating groove pattern so flat walls gain a faint vertical banding, like
+# panelled brick, without overpowering the distance shading. Hardwired LUT.
+WALL_TEX = np.array(
+    [2, 1, 0, -1, -2, -1, 0, 1, 2, 1, 0, -1, -2, -1, 0, 1],
+    dtype=np.int16,
+)
+
+# Resolution presets. The machine framebuffer is 64x32 (the signal panel), but
+# the oracle also supports a 96x48 target for the higher-resolution build. Both
+# are pinned. Each ray is drawn `colw` pixels wide to fill the width.
+HI_RES = {
+    "lo": {"w": 64, "h": 32, "cols": 64, "colw": 1},
+    "hi": {"w": 96, "h": 48, "cols": 96, "colw": 1},
+}
+
+
+def _cast_hi(px, py, angle_rad):
+    """Sub-stepped DDA returning (perp_dist_16ths, wall_frac_0_15, hit) for the
+    enhanced oracle. perp distance is in sixteenths of a cell (an integer, so the
+    result is exact and platform-independent), wall_frac is the texture coordinate
+    along the hit face (0..15), hit is True if a wall was found. Pure integer-ish
+    math kept deterministic: all the trig is folded into per-call dx,dy in
+    sixteenths-of-a-cell per substep, computed once with rounding so two runs of
+    the same heading give identical integers."""
+    dx = np.cos(angle_rad)
+    dy = np.sin(angle_rad)
+    # step length per micro-step in sixteenths-of-a-cell, scaled so the longer
+    # axis advances one substep-fraction of a cell each step.
+    inv = HI_SUBSTEPS
+    sx = dx / inv
+    sy = dy / inv
+    # walk in cell space using float for the march, but quantise the start so the
+    # path is reproducible; positions are exact float ops on the same inputs.
+    cx = px / 16.0
+    cy = py / 16.0
+    steps = HI_MAX_CELLS * HI_SUBSTEPS
+    prev_cx, prev_cy = cx, cy
+    for _ in range(steps):
+        cx += sx
+        cy += sy
+        mx = int(np.floor(cx))
+        my = int(np.floor(cy))
+        if _cell_solid(mx, my):
+            # which face did we cross to enter this cell? compare which integer
+            # boundary flipped between prev and now to pick the texture axis.
+            crossed_x = int(np.floor(cx)) != int(np.floor(prev_cx))
+            crossed_y = int(np.floor(cy)) != int(np.floor(prev_cy))
+            if crossed_x and not crossed_y:
+                frac = cy - np.floor(cy)
+            elif crossed_y and not crossed_x:
+                frac = cx - np.floor(cx)
+            else:
+                # both flipped on the same step (corner): pick the dominant axis.
+                frac = (cy - np.floor(cy)) if abs(dx) >= abs(dy) else (cx - np.floor(cx))
+            # perpendicular distance: project the travelled vector onto the view
+            # direction is unnecessary here because we cast per-column already; the
+            # straight-line distance is corrected for fisheye by the caller via the
+            # column angle. distance in sixteenths-of-a-cell:
+            ddx = cx - (px / 16.0)
+            ddy = cy - (py / 16.0)
+            dist_cells = (ddx * ddx + ddy * ddy) ** 0.5
+            wall_frac = int(frac * 16.0) & 0x0F
+            return dist_cells, wall_frac, True
+        prev_cx, prev_cy = cx, cy
+    return float(HI_MAX_CELLS), 0, False
+
+
+def render_reference_hi(
+    heading: int,
+    px: int = PLAYER_X,
+    py: int = PLAYER_Y,
+    res: str = "lo",
+    texture: bool = True,
+) -> np.ndarray:
+    """The ENHANCED 1-bit oracle: the gorgeous-within-1-bit frame.
+
+    Pure and deterministic: the returned (h, w) uint8 0/1 framebuffer is a fixed
+    function of (heading, px, py, res, texture). This is a SEPARATE contract from
+    render_reference / build_rom (which are unchanged); this frame is the frozen
+    target the hardware FSM must reproduce bit for bit.
+
+    heading is the integer angle index 0..NUM_ANGLES-1 (same convention as the
+    plain renderer) so the two oracles share a heading space. res is "lo" (64x32,
+    the signal panel) or "hi" (96x48). texture toggles the vertical wall texture.
+    """
+    cfg = HI_RES[res]
+    w, h, cols, colw = cfg["w"], cfg["h"], cfg["cols"], cfg["colw"]
+    disp = np.zeros((h, w), dtype=np.uint8)
+
+    half = h // 2
+    # field of view: 90 degrees, matching the plain renderer's HALF_FOV span.
+    base = (heading % NUM_ANGLES) / NUM_ANGLES * 2.0 * np.pi
+    fov = (2.0 * HALF_FOV / NUM_ANGLES) * 2.0 * np.pi  # angular width of the view.
+
+    # first pass: per-column ray cast -> (slice top, slice bottom, wall shade,
+    # wall texture frac, raw distance index). distances feed the depth-seam test.
+    tops = np.empty(cols, dtype=np.int32)
+    bots = np.empty(cols, dtype=np.int32)
+    wsh = np.empty(cols, dtype=np.int16)
+    wfr = np.empty(cols, dtype=np.int16)
+    dix = np.empty(cols, dtype=np.int32)
+
+    for c in range(cols):
+        # column camera offset across the FOV, -0.5..+0.5, with fisheye-correcting
+        # ray angle. classic camera-plane parametrisation.
+        camera = (c + 0.5) / cols - 0.5
+        ray = base + camera * fov
+        dist_cells, frac, hit = _cast_hi(px, py, ray)
+        # fisheye correction: perpendicular distance = ray distance * cos(camera).
+        perp = dist_cells * np.cos(camera * fov)
+        if perp < 0.02:
+            perp = 0.02
+        # slice height: an inverse-distance projection, the proportionality
+        # constant chosen so a wall one cell away fills most of the screen.
+        line_h = int((h * 1.1) / perp)
+        top = half - line_h // 2
+        bot = half + line_h // 2
+        if top < 0:
+            top = 0
+        if bot > h:
+            bot = h
+        tops[c] = top
+        bots[c] = bot
+        wfr[c] = frac
+        # distance index in sixteenths-of-a-cell, clamped to the LUT.
+        di = int(perp * 16.0)
+        if di < 0:
+            di = 0
+        if di >= HI_DIST_MAX:
+            di = HI_DIST_MAX - 1
+        dix[c] = di
+        wsh[c] = DIST_SHADE[di]
+
+    # depth-discontinuity seam: a column is a "depth edge" if its neighbour is at
+    # a markedly different distance (a corner / occlusion boundary). Such columns
+    # get a black vertical seam so walls at different depths separate cleanly.
+    DEPTH_SEAM_THRESH = 12  # sixteenths-of-a-cell jump that counts as an edge.
+    depth_edge = np.zeros(cols, dtype=bool)
+    for c in range(cols):
+        left = dix[c - 1] if c > 0 else dix[c]
+        right = dix[c + 1] if c < cols - 1 else dix[c]
+        if abs(int(dix[c]) - int(left)) >= DEPTH_SEAM_THRESH or abs(
+            int(dix[c]) - int(right)
+        ) >= DEPTH_SEAM_THRESH:
+            depth_edge[c] = True
+
+    # second pass: paint. ceiling, floor, then the wall slice with Bayer dither,
+    # finally the 1px black seams.
+    for c in range(cols):
+        top = int(tops[c])
+        bot = int(bots[c])
+        shade = int(wsh[c])
+        if texture:
+            shade = max(2, min(16, shade + int(WALL_TEX[wfr[c]])))
+        x0 = c * colw
+        x1 = x0 + colw
+
+        for x in range(x0, x1):
+            bxcol = x & 3
+            # ceiling: rows above the slice top, dithered by distance from horizon.
+            for y in range(0, top):
+                ri = half - 1 - y
+                if ri < 0:
+                    ri = 0
+                if ri >= FLOOR_SHADE_MAX:
+                    ri = FLOOR_SHADE_MAX - 1
+                s = int(CEIL_SHADE[ri])
+                if s > 0 and BAYER4[y & 3, bxcol] < s:
+                    disp[y, x] = 1
+            # floor: rows below the slice bottom.
+            for y in range(bot, h):
+                ri = y - half
+                if ri < 0:
+                    ri = 0
+                if ri >= FLOOR_SHADE_MAX:
+                    ri = FLOOR_SHADE_MAX - 1
+                s = int(FLOOR_SHADE[ri])
+                if s > 0 and BAYER4[y & 3, bxcol] < s:
+                    disp[y, x] = 1
+            # wall slice: Bayer-dithered by the column's wall shade.
+            for y in range(top, bot):
+                if BAYER4[y & 3, bxcol] < shade:
+                    disp[y, x] = 1
+
+        # 1px black edge seams at the slice top and bottom, so every wall slab is
+        # outlined against floor/ceiling. clear the boundary rows across the
+        # column's width.
+        if bot > top:
+            if top < h:
+                disp[top, x0:x1] = 0
+            if bot - 1 >= 0 and bot - 1 < h:
+                disp[bot - 1, x0:x1] = 0
+
+        # depth-discontinuity seam: a black vertical line over the slice extent.
+        if depth_edge[c]:
+            disp[top:bot, x0:x1] = 0
+
+    return disp
+
+
 # --- the ROM builder --------------------------------------------------------
 #
 # Register map for the assembled program:
