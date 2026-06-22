@@ -1,0 +1,11 @@
+{
+  "name": "cpu",
+  "map_x": 16384,
+  "map_y": 8192,
+  "cells": 1631,
+  "register_tiles": 54,
+  "nets_routed": 1632,
+  "nets_total": 1632,
+  "bridge_crossings": 660720,
+  "note": "full scenario JSON/.nut not persisted (~0.8GB/~0.2GB); emission verified in memory by test_emit_cpu_scenario_serialises_with_registers_and_clock"
+}
