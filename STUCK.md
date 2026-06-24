@@ -405,7 +405,21 @@ OpenTTD. `hdl/test_cpu.py::test_cpu_places_routes_completely` and
 result. (Earlier suggested router-level ideas, more riser columns / clock H-tree / second pass, were
 not needed: the failures were specific wide-fan-in and pad-column geometry, not a global crowding wall.)
 
-## 9. Self-feeding multi-gate composition: the reused-lane choreography wall, and the fixed-lane fix.
+## 9. Multi-gate composition. The reused-lane wall is real; the FIXED-NETWORK fix is now BUILT AND PROVEN (a half-adder computes).
+
+UPDATE (resolved at the half-adder scale): the fixed-lane fix predicted below was built and works. Three
+fixed physical NOR networks compute on real trains, each gate on its own lane wired by fixed signal-free
+coupling spurs, built once, NO train re-parked or disposed between reads (0 SellVehicle vs ~14 in the
+reused-lane selffib): a 3-gate chain `NOT(NOR(NOR(a,b),a))` = 1,0,1,1 (composes PAST 2 gates,
+`scenarios/stageA_gs/`); the carry `a AND b` = 0,0,0,1 (`scenarios/stageBcarry_gs/`, 4/4); and the sum
+`a XOR b` as a 6-gate network with fan-out and reconvergence = 0,1,1,0 (`scenarios/stageB_gs/`). Together
+the sum + carry are a 1-bit HALF-ADDER as a fixed physical network, all outputs from raw reader x, no
+Squirrel arithmetic. Verified by two agents (4 fresh servers each, source-audited) and the orchestrator's
+own fresh runs (carry `STBC s38 37 37 37 43` = 0,0,0,1; the 6-gate XOR `STGB s49 48 54 54 48` = 0,1,1,0,
+2/2 clean). Reliability caveat: the XOR reconvergent gate freeze flakes about 1 in 4 (whole-run all-ones);
+the carry and the 3-gate chain are solid. So the central composition wall is broken at the half-adder
+scale; what remains is scaling further (a multi-bit carry chain) and hardening the reconvergence freeze.
+The original analysis (kept for the record):
 
 The self-feeding 1-bit TOGGLE works (`scenarios/toggle_gs/`, next = NOT held Q, no schedule). Scaling
 the same idea to a self-feeding FIBONACCI (`scenarios/selffib_gs/`: two 2-bit registers a,b held as

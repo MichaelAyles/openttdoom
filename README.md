@@ -26,7 +26,7 @@ the map as tiles (see the images below). The real goal is the hard one, a DOOM f
 that:
 
 ```
-Machine-computed DOOM frame:  [##########--------------------]  ~32%
+Machine-computed DOOM frame:  [###########-------------------]  ~35%
 ```
 
 That number is deliberately honest. Every research UNKNOWN is now retired: a gate computes,
@@ -64,6 +64,9 @@ In OpenTTD, on real trains (judged from raw train positions, never from script):
   (`RG 11100`, 2 of 3 fresh runs) - the memory primitive that gated everything.
 - **The machine REMEMBERS**: a self-feeding 1-bit toggle whose next state is NOT of its OWN held
   bit, 0,1,0,1, with no schedule (3 of 4, 4 of 4 across two agents).
+- **Multi-gate ARITHMETIC composes**: a 1-bit HALF-ADDER as a fixed physical NOR network (the 6-gate
+  XOR sum 0,1,1,0 and the AND carry 0,0,0,1), each gate its own lane wired by fixed spurs, nothing
+  re-parked between reads, outputs from raw positions. The architecture that scales to a real datapath.
 - **Shown in-game**: the gorgeous raycaster frame stamped as on-map signal tiles, a rail portrait
   of a placed circuit, and clock-stepped Fibonacci (1,1,2,3,5,8,13) running on real gate lanes.
 - **OpenTTD builds from source here** (MSVC 2022), and a first speed fork gives ~3x on a bare map.
@@ -73,14 +76,16 @@ In OpenTTD, on real trains (judged from raw train positions, never from script):
 The primitives are all proven, so the remaining blockers are engineering, not unknowns. Two of the
 four were just closed; the other two are now sharply characterized:
 
-1. **Multi-gate composition at scale (the central one).** The clock LAUNCH is now FIXED (10/10, was
-   ~2/3, a one-toggle-per-settle egress fix), so single primitives are reliable. The wall is
-   COMPOSING them: a self-feeding 2-register Fibonacci, where the registers self-feed-read correctly
-   and a single adder gate computes, still never completes a term, because a full add needs ~18
-   SEQUENTIAL block-signal reads on one reused lane and the per-dispatch train choreography is only
-   ~2/3 to 4/5 reliable, so it collapses (STUCK.md #9). The identified fix, not yet built: a FIXED
-   physical NOR network, each gate its own lane with held trains coupled via spurs (norchain-style),
-   so no per-gate train is re-parked between reads, exactly why the toggle was reliable.
+1. **Multi-gate composition at scale (the central one), now BROKEN at the half-adder.** The clock
+   launch is fixed (10/10), and the composition wall is cracked: a 1-bit HALF-ADDER computes as a
+   FIXED physical NOR network on real trains (the 6-gate XOR sum = 0,1,1,0 and the AND carry =
+   0,0,0,1, each gate its own lane wired by fixed spurs, NO train re-parked between reads, outputs
+   from raw positions, STUCK.md #9). This is the architecture that works: the reused-lane,
+   re-park-per-read version (a self-feeding Fibonacci adder) collapsed to zero terms, while the
+   fixed network composes past two gates and does real arithmetic. What remains is scaling it: a
+   multi-bit ripple carry chain, and hardening the one flaky spot (the XOR reconvergent gate freeze
+   misses about 1 in 4). The path from a half-adder to the full machine is now an engineering ramp,
+   not a wall.
 2. **Router DRC at scale: RESOLVED.** The full CPU (1631 cells) and the large raycaster FSM cones now
    place and route 100 percent of nets with 0 DRC (was ~410), the clock reaching every register, logic
    preserved, all 381 tests green (STUCK.md #8). So the toolchain produces a cleanly buildable full
