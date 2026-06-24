@@ -26,7 +26,7 @@ the map as tiles (see the images below). The real goal is the hard one, a DOOM f
 that:
 
 ```
-Machine-computed DOOM frame:  [#########---------------------]  ~30%
+Machine-computed DOOM frame:  [##########--------------------]  ~32%
 ```
 
 That number is deliberately honest. Every research UNKNOWN is now retired: a gate computes,
@@ -34,9 +34,10 @@ gates compose, there is a self-sustaining clock, a **clocked register holds a bi
 a **self-feeding machine evolves from its own held state**, the toolchain compiles BOTH a small
 CPU and a hardwired raycaster FSM (and verifies them gate for gate), and the 1-bit workload is
 made genuinely good-looking. What remains is no longer a mystery, it is CONSTRUCTION at scale:
-building a machine of ~1400 gates plus registers reliably (per-cell reliability is ~2/3 to 4/5
-today, and reliability compounds), and running it fast enough to finish a frame. The hard
-science is done; the hard engineering is not.
+the clock launch is now reliable (10/10) and single primitives are solid, but COMPOSING ~18
+sequential gate reads into one datapath edge on a reused lane still collapses, so the next step is
+a fixed physical NOR network (each gate its own lane) rather than per-read train choreography, plus
+running it fast enough to finish a frame. The hard science is done; the hard engineering is not.
 
 ### Milestones achieved (verified in software, and the marked ones on real trains)
 
@@ -69,23 +70,28 @@ In OpenTTD, on real trains (judged from raw train positions, never from script):
 
 ### What stands between here and a machine-computed frame
 
-The primitives are all proven, so the remaining blockers are engineering, not unknowns:
+The primitives are all proven, so the remaining blockers are engineering, not unknowns. Two of the
+four were just closed; the other two are now sharply characterized:
 
-1. **Scale and reliability (the central one).** Every in-game primitive works, but at 1 to 3 cells
-   and ~2/3 to 4/5 reliability (a roughly 1-in-3 flaky clock LAUNCH, and train-dispatch races). A
-   full raycaster FSM is ~1400 NOR cells plus ~84 registers, and reliability compounds, so building
-   a machine that size reliably is the heart of the remaining work.
-2. **Router DRC at scale.** The CPU and the FSM route 100 percent of their nets with the clock
-   reaching every register, but the constructive channel router throws ~410 DRC shorts at ~1600
-   cells (a backend scale limit, STUCK.md #8); the largest designs are not DRC-clean yet. The adder
-   (92 cells) and the ALU (893 cells) route clean.
-3. **Pure-hardware feedback.** The register and the self-feeding toggle work, but their write-BACK
-   is GameScript-mediated; a pure track-signal feedback loop hits an OpenTTD reservation-coupling
-   (the syncgate blocker). A fully self-contained sequential element needs that solved.
-4. **Speed.** A frame is on the order of 1600 cycles on a huge machine. A first speed fork gives
-   ~3x on a bare map (a runtime flag stripping per-tick housekeeping useless on a logic map) but
-   shrinks toward 1x as trains scale; the deeper lever is pathfinding and per-train hot-path surgery
-   (`docs/speed_fork.md`, `docs/speed_fork.patch`).
+1. **Multi-gate composition at scale (the central one).** The clock LAUNCH is now FIXED (10/10, was
+   ~2/3, a one-toggle-per-settle egress fix), so single primitives are reliable. The wall is
+   COMPOSING them: a self-feeding 2-register Fibonacci, where the registers self-feed-read correctly
+   and a single adder gate computes, still never completes a term, because a full add needs ~18
+   SEQUENTIAL block-signal reads on one reused lane and the per-dispatch train choreography is only
+   ~2/3 to 4/5 reliable, so it collapses (STUCK.md #9). The identified fix, not yet built: a FIXED
+   physical NOR network, each gate its own lane with held trains coupled via spurs (norchain-style),
+   so no per-gate train is re-parked between reads, exactly why the toggle was reliable.
+2. **Router DRC at scale: RESOLVED.** The full CPU (1631 cells) and the large raycaster FSM cones now
+   place and route 100 percent of nets with 0 DRC (was ~410), the clock reaching every register, logic
+   preserved, all 381 tests green (STUCK.md #8). So the toolchain produces a cleanly buildable full
+   machine in software.
+3. **Pure-hardware feedback.** The register and the self-feeding toggle work, but their write-BACK is
+   GameScript-mediated; a pure track-signal feedback loop hits an OpenTTD reservation-coupling (the
+   syncgate blocker). A fully self-contained sequential element needs that solved.
+4. **Speed.** A frame is on the order of 1600 cycles on a huge machine. The ~3x bare-map fork exists,
+   but the assumed deeper lever was a dead end: profiling proved the per-train YAPF pathfinder is
+   NEVER called on fixed PBS rings (OpenTTD's reservation follower handles them), so the real per-tick
+   cost is the vehicle controller and signal resolution, not pathfinding (`docs/speed_fork.md`).
 
 ## The in-game breakthroughs
 
