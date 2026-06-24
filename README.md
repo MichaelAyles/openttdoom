@@ -34,9 +34,9 @@ gates compose, there is a self-sustaining clock, a **clocked register holds a bi
 a **self-feeding machine evolves from its own held state**, the toolchain compiles BOTH a small
 CPU and a hardwired raycaster FSM (and verifies them gate for gate), and the 1-bit workload is
 made genuinely good-looking. What remains is no longer a mystery, it is CONSTRUCTION at scale:
-the clock launch is now reliable (10/10) and single primitives are solid, but COMPOSING ~18
-sequential gate reads into one datapath edge on a reused lane still collapses, so the next step is
-a fixed physical NOR network (each gate its own lane) rather than per-read train choreography, plus
+the clock launch is now reliable (10/10), single primitives are solid, and multi-gate arithmetic now
+COMPOSES as a fixed physical network (a 1-bit half-adder computes on real trains, each gate its own
+lane, nothing re-parked between reads). The next step is scaling that to a multi-bit datapath and
 running it fast enough to finish a frame. The hard science is done; the hard engineering is not.
 
 ### Milestones achieved (verified in software, and the marked ones on real trains)
