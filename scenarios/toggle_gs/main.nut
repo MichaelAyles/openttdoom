@@ -144,7 +144,58 @@ function ToggleMain::BuildClockStatic() {
     GSRail.BuildRailTrack(this.T(CDX, LY0), GSRail.RAILTRACK_NW_SW);
     this.SignalLoopOneWay();
 }
-function ToggleMain::LaunchClockConfirmed() {
+// ---- HARDENED CLOCK LAUNCH (shared helper, identical across clockgate/register/toggle) ----
+//
+// THE DIAGNOSED FLAW. The old launch nudged egress with a TIGHT poll:
+//     for (...) { if (IsStoppedInDepot) StartStopVehicle; Sleep(5); if (moved) break; }
+// StartStopVehicle TOGGLES the stopped flag and is an ASYNCHRONOUS (queued) command. After it
+// is fired the train stays IsStoppedInDepot==true for several ticks until the command lands and
+// the train physically clears the depot tile. In that window the tight poll re-reads
+// IsStoppedInDepot==true and fires a SECOND toggle, which RE-STOPS the train once both land.
+// Under the extra command-queue latency of a concurrent CPU-heavy server these double-toggles
+// OSCILLATE: the train takes many cycles to leave, and ~1 in 3 fresh starts it never leaves
+// inside the egress budget, giving a stall / CKFAIL. (Measured: 9/10 baseline, the 1 a
+// "TG clk.." stall that never confirmed a lap in window.)
+//
+// THE FIX, three layers:
+//  1. NudgeEgress: fire EXACTLY ONE start toggle from a CONFIRMED-stopped state, then SETTLE
+//     (a long sleep) so the queued command lands and the train accelerates out, and only THEN
+//     re-check. Never fire a second toggle while a previous one may still be in flight. This
+//     kills the oscillation: each toggle is from a known state with a settle between.
+//  2. LaunchOnce: build (retried), order, movement-VERIFIED egress, then a robust lap confirm.
+//  3. LaunchClockConfirmed: wrap LaunchOnce in a TEARDOWN-AND-RETRY. If a single launch attempt
+//     fails (egress stuck or lap not confirmed) we SELL the stuck clock, rebuild the depot, and
+//     retry the whole launch up to TRIES times before returning false (CKFAIL). A stuck attempt
+//     can never poison the next: each retry starts from a clean depot with no leftover train.
+
+// One-shot, settle-verified depot egress. Returns true once the clock has physically left the
+// depot tile (cx>=0 and not the depot tile), false if it never leaves within the budget. Fires
+// AT MOST one start toggle per SETTLE so a queued toggle is never double-fired (the old bug).
+function ToggleMain::NudgeEgress(v) {
+    // GENEROUS total budget (40 * 12 = 480 ticks, longer than the old 400-tick egress) so a
+    // genuinely dropped StartStop command has many settle-spaced retries to take. The settle is
+    // the fix: a fresh toggle is fired ONLY when the train is CONFIRMED still stopped-in-depot
+    // AFTER the prior settle (so the prior toggle provably did not land == a dropped command).
+    // A started-but-not-yet-moving train reads IsStoppedInDepot==false and is left alone, so a
+    // command in flight is never double-toggled.
+    for (local r = 0; r < 40; r++) {
+        if (!GSVehicle.IsValidVehicle(v)) return false;
+        local cx = this.Tx(v); local cy = this.Ty(v);
+        if (cx >= 0 && !(cx == CDX && cy == LY0 - 1)) return true;   // left the depot tile
+        if (GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
+        GSController.Sleep(12);                                       // settle: let the toggle land
+    }
+    if (GSVehicle.IsValidVehicle(v)) {
+        local cx = this.Tx(v); local cy = this.Ty(v);
+        if (cx >= 0 && !(cx == CDX && cy == LY0 - 1)) return true;
+    }
+    return false;
+}
+
+// A SINGLE launch attempt: build the clock (retried), order it round the loop, verify egress,
+// then confirm a full lap. Returns true only on a confirmed lap. Leaves this.clock set (valid
+// or invalid) for the caller's teardown.
+function ToggleMain::LaunchOnce() {
     this.clock = null;
     for (local b = 0; b < 12; b++) {
         local v = GSVehicle.BuildVehicle(this.cdepot, this.eng);
@@ -157,24 +208,67 @@ function ToggleMain::LaunchClockConfirmed() {
     if (!GSVehicle.IsValidVehicle(this.clock)) return false;
     GSOrder.AppendOrder(this.clock, this.T(LX1, LY1), GSOrder.OF_NON_STOP_INTERMEDIATE);
     GSOrder.AppendOrder(this.clock, this.T(LX0, LY0), GSOrder.OF_NON_STOP_INTERMEDIATE);
-    local left = false;
-    for (local r = 0; r < 80; r++) {
-        if (!GSVehicle.IsValidVehicle(this.clock)) return false;
-        if (GSVehicle.IsStoppedInDepot(this.clock)) GSVehicle.StartStopVehicle(this.clock);
-        GSController.Sleep(5);
-        local cx = this.Tx(this.clock); local cy = this.Ty(this.clock);
-        if (cx >= 0 && !(cx == CDX && cy == LY0 - 1)) { left = true; break; }
-    }
-    if (!left) return false;
+    // settle-verified egress (replaces the tight double-toggling poll).
+    if (!this.NudgeEgress(this.clock)) return false;
+    // confirm a FULL LAP. Watch the clock reach the bottom run then return to the left run. The
+    // clock is one-way signalled and the only train, so once moving it cannot deadlock; we only
+    // RE-NUDGE if it somehow ends stopped in the depot again (rare), once, with a settle.
     local sawBottom = false;
     for (local i = 0; i < 400; i++) {
         if (!GSVehicle.IsValidVehicle(this.clock)) return false;
-        if (GSVehicle.IsStoppedInDepot(this.clock)) GSVehicle.StartStopVehicle(this.clock);
+        if (GSVehicle.IsStoppedInDepot(this.clock)) { GSVehicle.StartStopVehicle(this.clock); GSController.Sleep(12); }
         local cx = this.Tx(this.clock); local cy = this.Ty(this.clock);
         if (cy == LY1) sawBottom = true;
         if (sawBottom && cx == LX0 && cy >= LY0 && cy <= LY1)
             return true;
         GSController.Sleep(5);
+    }
+    return false;
+}
+
+// Sell a stuck/leftover clock train (used between launch retries so a failed attempt never
+// leaves a train on the loop that would block the next). Returns true only once the loop is
+// CONFIRMED clear (the train was parked in the depot and SOLD, or was already gone). A moving
+// train is NEVER sold (SellVehicle fails mid-track and would leak a second train onto the
+// one-way loop): instead it is ordered into the depot and we wait beyond a full lap for it to
+// park. Fully guarded; the caller does not build a fresh clock until this returns true.
+function ToggleMain::TeardownClock() {
+    local v = this.clock;
+    if (v == null || !GSVehicle.IsValidVehicle(v)) { this.clock = null; return true; }  // gone
+    if (!GSVehicle.IsStoppedInDepot(v)) {
+        this.ClearOrders(v);
+        GSOrder.AppendOrder(v, this.cdepot, GSOrder.OF_NON_STOP_INTERMEDIATE);
+        if (GSVehicle.IsValidVehicle(v) && GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
+        // wait beyond a full lap (60 * 8 = 480 ticks) for it to reach and stop in the depot.
+        for (local s = 0; s < 60; s++) {
+            if (!GSVehicle.IsValidVehicle(v) || GSVehicle.IsStoppedInDepot(v)) break;
+            GSController.Sleep(8);
+        }
+    }
+    if (!GSVehicle.IsValidVehicle(v)) { this.clock = null; return true; }
+    if (GSVehicle.IsStoppedInDepot(v)) {
+        GSVehicle.SellVehicle(v);
+        if (!GSVehicle.IsValidVehicle(v)) { this.clock = null; return true; }
+    }
+    return false;   // still on the loop: keep this.clock so a retry can re-target it
+}
+
+// Launch the clock and CONFIRM a full lap, RETRYING the whole launch on failure. Each retry
+// tears down any stuck train and rebuilds the depot so it starts clean. Returns false (CKFAIL)
+// only if every attempt fails.
+function ToggleMain::LaunchClockConfirmed() {
+    for (local t = 0; t < 4; t++) {
+        if (this.LaunchOnce()) return true;
+        this.Say("TG clkR" + t);             // visible retry marker (short, fixed width)
+        // CLEAR THE LOOP before building a fresh clock: TeardownClock returns true only once the
+        // old train is parked and sold (a moving train is never sold). Retry teardown a few
+        // times so a second train is never built onto a still-occupied one-way loop.
+        for (local d = 0; d < 4 && !this.TeardownClock(); d++) GSController.Sleep(20);
+        // rebuild the depot + loop join in case a partial build or the teardown disturbed it.
+        GSRail.BuildRailDepot(this.cdepot, this.T(CDX, LY0));
+        GSRail.BuildRailTrack(this.T(CDX, LY0), GSRail.RAILTRACK_NW_NE);
+        GSRail.BuildRailTrack(this.T(CDX, LY0), GSRail.RAILTRACK_NW_SW);
+        GSController.Sleep(20);
     }
     return false;
 }
