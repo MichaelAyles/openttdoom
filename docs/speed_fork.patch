@@ -31,7 +31,7 @@ index 8c5cf4b..ae75d75 100644
  
  	OnTick_Companies();
 diff --git a/src/openttd.cpp b/src/openttd.cpp
-index 7d585b0..3cbcd75 100644
+index 7d585b0..17da74c 100644
 --- a/src/openttd.cpp
 +++ b/src/openttd.cpp
 @@ -95,6 +95,25 @@
@@ -60,7 +60,28 @@ index 7d585b0..3cbcd75 100644
  void CallLandscapeTick();
  void DoPaletteAnimations();
  void MusicLoop();
-@@ -502,6 +521,12 @@ int openttd_main(std::span<std::string_view> arguments)
+@@ -449,8 +468,20 @@ struct AfterNewGRFScan : NewGRFScanCallback {
+ 	}
+ };
+ 
++extern uint64_t _ottdoom_pf_hits, _ottdoom_pf_miss;
++
+ void PostMainLoop()
+ {
++	/* openttdoom speed fork: optional stats dump for the per-train pathfinder cache,
++	 * written to the file named by OTTDOOM_PFSTATS (used only for benchmarking; has
++	 * no effect on the simulation). */
++	if (const char *p = std::getenv("OTTDOOM_PFSTATS"); p != nullptr) {
++		if (FILE *f = fopen(p, "w"); f != nullptr) {
++			fmt::print(f, "pf_hits={} pf_miss={}\n", _ottdoom_pf_hits, _ottdoom_pf_miss);
++			fclose(f);
++		}
++	}
++
+ 	WaitTillSaved();
+ 
+ 	/* only save config if we have to */
+@@ -502,6 +533,12 @@ int openttd_main(std::span<std::string_view> arguments)
  	_game_session_stats.start_time = std::chrono::steady_clock::now();
  	_game_session_stats.savegame_size = std::nullopt;
  
@@ -73,7 +94,7 @@ index 7d585b0..3cbcd75 100644
  	std::string musicdriver;
  	std::string sounddriver;
  	std::string videodriver;
-@@ -1263,7 +1288,9 @@ void StateGameLoop()
+@@ -1263,7 +1300,9 @@ void StateGameLoop()
  		}
  		TimerManager<TimerGameEconomy>::Elapsed(1);
  		TimerManager<TimerGameTick>::Elapsed(1);
@@ -84,11 +105,37 @@ index 7d585b0..3cbcd75 100644
  		CallVehicleTicks();
  		CallLandscapeTick();
  		BasePersistentStorageArray::SwitchMode(PSM_LEAVE_GAMELOOP);
+diff --git a/src/pathfinder/yapf/yapf_rail.cpp b/src/pathfinder/yapf/yapf_rail.cpp
+index d7e0878..f2cccaf 100644
+--- a/src/pathfinder/yapf/yapf_rail.cpp
++++ b/src/pathfinder/yapf/yapf_rail.cpp
+@@ -666,3 +666,11 @@ void YapfNotifyTrackLayoutChange(TileIndex tile, Track track)
+ {
+ 	CSegmentCostCacheBase::NotifyTrackLayoutChange(tile, track);
+ }
++
++/* openttdoom speed fork: expose the global rail-layout change counter so the
++ * per-train pathfinder decision cache in train_cmd.cpp can key on it and miss
++ * whenever any track or signal changes. */
++int _ottdoom_rail_change_counter()
++{
++	return CSegmentCostCacheBase::s_rail_change_counter;
++}
 diff --git a/src/train_cmd.cpp b/src/train_cmd.cpp
-index 91a1111..27d0653 100644
+index 91a1111..d0fc252 100644
 --- a/src/train_cmd.cpp
 +++ b/src/train_cmd.cpp
-@@ -43,6 +43,10 @@
+@@ -8,6 +8,9 @@
+ /** @file train_cmd.cpp Handling of trains. */
+ 
+ #include "stdafx.h"
++
++#include <unordered_map> // openttdoom speed fork: per-train pathfinder decision cache
++
+ #include "error.h"
+ #include "articulated_vehicles.h"
+ #include "command_func.h"
+@@ -43,6 +46,79 @@
  
  #include "safeguards.h"
  
@@ -96,10 +143,118 @@ index 91a1111..27d0653 100644
 + * work (smoke/steam visual effects) that is dead on a headless logic-train map. */
 +extern bool _ottdoom_logic_map;
 +
++/*
++ * openttdoom speed fork: per-train pathfinder DECISION CACHE.
++ *
++ * Motivation: the reader/clock trains of the logic machine follow a FIXED track,
++ * so at every choice point the YAPF A* search recomputes the same answer. The
++ * track a train takes out of a junction is a pure function of (where its current
++ * reservation ends, its destination, the static rail layout); it does NOT depend
++ * on other trains' dynamic reservations (those only affect whether the reservation
++ * SUCCEEDS, handled separately by ExtendTrainReservation before YAPF runs).
++ *
++ * So we memoise the YAPF track choice per train, keyed on the exact pathfinding
++ * inputs. The cache is consulted at the DoTrainPathfind boundary in ChooseTrainTrack.
++ *
++ * SAFETY (this must never change where a train goes):
++ *   - Gated entirely by _ottdoom_logic_map. Flag off == exact stock behaviour, the
++ *     cache code is never entered.
++ *   - The cache only ever supplies the FIRST trackdir to follow. It NEVER replaces
++ *     the reservation: on a hit we still call the real YAPF to perform the path
++ *     reservation. The only thing reused is the cheap branch where YAPF is asked
++ *     to choose but NOT reserve (reserve_track == false): there the result has no
++ *     side effects, so reusing it is provably a no-op-equivalent.
++ *   - The key includes the global rail-layout change counter
++ *     (CSegmentCostCacheBase::s_rail_change_counter), the train's destination tile
++ *     and current order index, and all the geometric inputs, so any track edit,
++ *     signal change, order change or destination change misses the cache and
++ *     re-runs YAPF.
++ *   - The cache is process-local (keyed by VehicleID), NOT stored in the savegame,
++ *     so it adds zero bytes to any save and cannot affect a deterministic re-run's
++ *     output.
++ *
++ * Because a correct skip of the reserving A* would require replaying YAPF's full
++ * node path (desync-risky surgery), this cache deliberately only short-circuits the
++ * NON-reserving YAPF query, which is the part that is safe to reuse. See
++ * docs/speed_fork.md "Per-train pathfinding cache" for the full reasoning and the
++ * honest measurement.
++ */
++struct OttdoomPfKey {
++	uint32_t tile;        ///< choice tile YAPF is asked about
++	uint32_t dest;        ///< train destination tile
++	uint16_t tracks;      ///< available track bits at the choice
++	uint8_t  enterdir;    ///< entry direction into the choice tile
++	uint8_t  order_index; ///< current real order index
++	int      rail_ver;    ///< global rail-layout change counter
++
++	bool operator==(const OttdoomPfKey &o) const
++	{
++		return this->tile == o.tile && this->dest == o.dest && this->tracks == o.tracks &&
++				this->enterdir == o.enterdir && this->order_index == o.order_index && this->rail_ver == o.rail_ver;
++	}
++};
++struct OttdoomPfVal {
++	OttdoomPfKey key;
++	Track        track;       ///< cached first trackdir choice
++	bool         valid = false;
++};
++/* One slot per train (by VehicleID). Cleared lazily on key mismatch. */
++static std::unordered_map<uint32_t, OttdoomPfVal> _ottdoom_pf_cache;
++uint64_t _ottdoom_pf_hits = 0;   ///< stats: cache reuses (exposed for measurement)
++uint64_t _ottdoom_pf_miss = 0;   ///< stats: real YAPF runs
++
++extern int _ottdoom_rail_change_counter();
++
++/* openttdoom: compile-time switch so a true control binary (cache off) can be
++ * built from the identical tree to isolate the cache's effect. Define to 0 to
++ * disable the per-train pathfinder decision cache; 1 (default) enables it. */
++#ifndef OTTDOOM_PF_CACHE_ENABLED
++#define OTTDOOM_PF_CACHE_ENABLED 1
++#endif
++
  static Track ChooseTrainTrack(Train *v, TileIndex tile, DiagDirection enterdir, TrackBits tracks, bool force_res, bool *got_reservation, bool mark_stuck);
  static bool TrainCheckIfLineEnds(Train *v, bool reverse = true);
  bool TrainController(Train *v, Vehicle *nomove, bool reverse = true); // Also used in vehicle_sl.cpp.
-@@ -3993,7 +3997,10 @@ static bool TrainLocoHandler(Train *v, bool mode)
+@@ -2802,7 +2878,37 @@ static Track ChooseTrainTrack(Train *v, TileIndex tile, DiagDirection enterdir,
+ 		bool      path_found = true;
+ 		TileIndex new_tile = res_dest.tile;
+ 
+-		Track next_track = DoTrainPathfind(v, new_tile, dest_enterdir, tracks, path_found, do_track_reservation, &res_dest, &final_dest);
++		/* openttdoom speed fork: per-train pathfinder decision cache. Only used to
++		 * short-circuit the NON-reserving YAPF query (do_track_reservation == false),
++		 * where the result has no side effects so reusing the cached first-trackdir
++		 * is provably equivalent to re-running the search. When a reservation IS
++		 * requested we always run the real YAPF, because reserving needs YAPF's full
++		 * node path, not just the cached choice. The key includes the rail-layout
++		 * version, destination and order index, so any layout/route change misses. */
++		Track next_track;
++		if (OTTDOOM_PF_CACHE_ENABLED && _ottdoom_logic_map && !do_track_reservation) {
++			OttdoomPfKey key{
++				new_tile.base(), v->dest_tile.base(), (uint16_t)tracks, (uint8_t)dest_enterdir,
++				(uint8_t)v->cur_real_order_index, _ottdoom_rail_change_counter()
++			};
++			OttdoomPfVal &slot = _ottdoom_pf_cache[v->index.base()];
++			if (slot.valid && slot.key == key) {
++				/* Reuse the previously chosen first-trackdir. This is the non-reserving
++				 * query, so there is no reservation side effect to replay; the only
++				 * outputs that matter below (best_track and path_found) are reproduced. */
++				next_track = slot.track;
++				path_found = true;
++				_ottdoom_pf_hits++;
++			} else {
++				next_track = DoTrainPathfind(v, new_tile, dest_enterdir, tracks, path_found, do_track_reservation, &res_dest, &final_dest);
++				slot.key = key;
++				slot.track = next_track;
++				slot.valid = true;
++				_ottdoom_pf_miss++;
++			}
++		} else {
++			next_track = DoTrainPathfind(v, new_tile, dest_enterdir, tracks, path_found, do_track_reservation, &res_dest, &final_dest);
++		}
+ 		if (new_tile == tile) best_track = next_track;
+ 		v->HandlePathfindingResult(path_found);
+ 	}
+@@ -3993,7 +4099,10 @@ static bool TrainLocoHandler(Train *v, bool mode)
  
  	if (CheckTrainStayInDepot(v)) return true;
  

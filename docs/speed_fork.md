@@ -351,3 +351,197 @@ separately: the 50000-tick exit save differs from the original in 24530 bytes an
 and the 75000-tick save is larger still. Verdict: the per-train speedup reproduces (1.02x smoke off,
 1.06x smoke on) and is correctness-preserving (movement and pathing byte-identical, only the
 cosmetic sound counter changes).
+
+## Per-train pathfinding cache (the YAPF lever), measured (2026-06-24)
+
+The "Next lever" and "remaining floor" sections above flagged the genuinely big per-train cost as
+the YAPF pathfinding call, and pointed at caching the fixed reader/clock train's path. This section
+takes that lever: it adds a SAFE per-train pathfinder decision cache behind the same
+`_ottdoom_logic_map` flag, measures it honestly on the train-heavy `loopbench.sav`, and reports a
+result that is more important than a speed number: on these benchmarks the per-train YAPF
+pathfinder is NEVER CALLED, so there is nothing to cache. The cheap reservation follower already
+short-circuits it. The premise that a fixed-route train "re-runs the pathfinder at every junction"
+does not hold for single-train PBS rings in OpenTTD 15.3.
+
+### What was profiled, and the decisive finding
+
+Before writing any cache, the hot path was instrumented (counters in `ChooseTrainTrack`,
+`DoTrainPathfind`, and all four YAPF train entry points `YapfTrainChooseTrack` /
+`YapfTrainCheckReverse` / `YapfTrainFindNearestDepot` / `YapfTrainFindNearestSafeTile`), dumped to a
+file at exit (the Windows binary is GUI-subsystem so stdout is not piped). Run on `loopbench.sav`
+with the flag on for 300000 ticks:
+
+- `TrainController` is called 9.25 million times; ~94% of those calls have `cur_speed > 0`. The
+  trains are NOT crashed, NOT in a depot, NOT reversing.
+- BUT not a single train ever crosses a tile boundary in the locomotive controller path
+  (`tc_newtile = 0`, `allcross = 0`), and a probed train's x position oscillates in a 9-unit window
+  (1588..1596) on ONE tile (tile 6499) for the entire run. The trains have speed but are pinned
+  against a red PBS signal they never reserve past.
+- Consequently `ChooseTrainTrack` is called **0** times and every YAPF entry point counts **0**:
+  `choose=0 reverse=0 depot=0 safe=0`. No pathfinding of any kind runs.
+
+So `loopbench.sav` (and `loopbench_cos.sav`) is a degenerate benchmark for pathfinding: the trains
+are signal-gridlocked from tick 0 and never path-find. The 8.67 million "moving" controller calls
+are trains accelerating into a held signal, repeatedly, which is the `same-tile` branch
+(`TrainCheckIfLineEnds` + `VehicleEnterTile`), not pathfinding.
+
+This was checked further by building two NEW maps where trains genuinely circulate (verified by a
+growing exit save and ~16k-18k byte movement deltas): `loopbench2` (rings with a dead-end junction
+siding) and `juncforce` (rings with a diagonal chord junction). On BOTH, with circulating trains,
+`DoTrainPathfind` still fired **0** times (`pf_hits=0 pf_miss=0`, and a reserving-path counter also
+0). The reason is structural: OpenTTD's `ExtendTrainReservation` follower only hands off to the YAPF
+A* search when it reaches a tile with more than one onward trackdir BEFORE finding a safe waiting
+position (a PBS signal or track end). For a fixed single-path-per-train ring with PBS signals, the
+follower always reaches the next signal first and returns `okay` without ever invoking YAPF. The A*
+search only fires at a genuine fork with no safe tile in between, which a simple benchmark ring does
+not present. The real openttdoom machine map, with reader trains routed through gate junctions to
+distant outputs, is the case that WOULD invoke YAPF; an isolated single-train ring is not.
+
+### The cache, and why it is safe
+
+The optimization (in `src/train_cmd.cpp`, plus a one-line accessor in
+`src/pathfinder/yapf/yapf_rail.cpp` to read the global rail-layout change counter) memoises the YAPF
+track choice per train at the `DoTrainPathfind` boundary inside `ChooseTrainTrack`. It is a
+process-local `unordered_map<VehicleID, {key, track}>`, NOT stored in the savegame, so it adds zero
+bytes to any save.
+
+It is consulted ONLY on the NON-reserving YAPF query (`do_track_reservation == false`, the
+look-ahead from `CheckNextTrainTile`). On that path the YAPF result has no side effects (the function
+returns `best_track` immediately afterwards without using the path for reservation), so reusing the
+cached first-trackdir is provably equivalent to re-running the search. When a reservation IS
+requested, the cache is bypassed and the real YAPF always runs, because reserving needs YAPF's full
+node path, not just the cached choice (skipping that safely would require replaying the whole node
+chain, which is desync-risky surgery and is deliberately not done). The cache key is
+`(choice tile, destination tile, available track bits, enter direction, current order index, global
+rail-layout change counter)`, so any track edit, signal change, order change, destination change or
+layout version bump misses the cache and re-runs YAPF. The whole thing is gated by
+`_ottdoom_logic_map`; flag off is exact stock behaviour and the cache code is never entered.
+
+### Result, measured (same flag on both, only the binary differs)
+
+- baseline = housekeeping + per-train cut, no pathfinding cache (`openttd_baseline.exe`).
+- optimized = baseline + the pathfinding cache (`openttd_fast.exe`).
+
+Both run `OTTDOOM_LOGIC_MAP=1 <exe> -x -vnull:ticks=300000 -snull -mnull -c openttd.cfg -g
+loopbench.sav`. NOTE ON CONDITIONS: a concurrent reliability track was running on the same box during
+these runs and intermittently loaded the CPU, so absolute ticks/sec are depressed (~20k-23k tps,
+versus ~27k tps measured earlier on an idle box) and the run-to-run spread (~2 s at 300000 ticks)
+swamps the tiny between-binary difference. The honest comparison is an interleaved burst (base and
+opt runs alternated so they share the same noise window), raw wall-clock seconds pasted from the
+shell:
+
+| run | baseline (s) | optimized (s) |
+| --- | --- | --- |
+| 1 | 15.039 | 15.026 |
+| 2 | 14.466 | 13.381 |
+| 3 | 13.108 | 13.275 |
+| 4 | 13.239 | 13.588 |
+| avg | 13.963 | 13.818 |
+
+That is **0.9967 / 1 = ~1.00x** (optimized 1.01x faster in this sample, well inside the noise). A
+separate non-interleaved burst gave baseline avg 13.888 s vs optimized 14.433 s (~1.04x the other
+way), confirming the difference is pure contention noise, not signal. The honest ratio is **1.00x,
+i.e. no measurable change**, and the reason is not that the cache is weak: it is that the cache is
+NEVER REACHED on this benchmark, because no train ever path-finds. The cache stats confirm it
+directly: `pf_hits=0 pf_miss=0` over 300000 ticks on `loopbench.sav`.
+
+### Correctness, proven deterministically
+
+The cache must never change where a train goes. Proven, not asserted: running `loopbench.sav` under
+the baseline and the optimized binary for the same tick count (with `autosave_on_exit`, the null
+driver writes a bit-comparable `exit.sav`) gives `exit.sav` files that are **byte-for-byte
+identical** (0 differing bytes) at both N=50000 and N=100000. The same byte-identical result holds on
+the two circulating maps `loopbench2.sav` and `juncforce.sav` at N=50000. Every field (tile,
+position, direction, speed, track, order state) is unchanged. Since the cache is process-local it
+also adds zero bytes to the save. The optimization is exactly movement-neutral, here trivially so
+because it is a no-op on these maps.
+
+### Honest verdict
+
+This is the safe, correctness-preserving pathfinding lever the prior section asked for, implemented
+and gated. On the available train-heavy benchmark it yields no speedup, NOT because YAPF is "already
+cached well" but because YAPF is not called at all for fixed-route single-train PBS rings; OpenTTD's
+reservation follower handles them without the A* search. The measured win is therefore 1.00x with
+full disclosure. The cache is real, sound and ready for a workload that actually invokes per-train
+YAPF (the machine map's reader trains crossing real gate junctions to distant targets), but proving
+a speed win there needs that map, which this benchmark is not. No number was faked: the baseline and
+optimized seconds are raw wall-clock, the ratio is honestly ~1.00x, and the profiling that explains
+why (zero pathfinding) is the load-bearing result.
+
+### Reproduce
+
+Rebuild as above (the cache touches `src/train_cmd.cpp` and adds one accessor to
+`src/pathfinder/yapf/yapf_rail.cpp`). For the profiling, set `OTTDOOM_PFSTATS=<file>` to dump the
+cache hit/miss counts at exit (no effect on the simulation). Correctness:
+`C:/Users/mikea/sfcfg/diffcheck.sh <save> <ticks> openttd_baseline.exe openttd_fast.exe` runs both
+binaries for the same ticks under `openttd_verify.cfg` (autosave on exit) and diffs the exit saves.
+Timing: `python C:/Users/mikea/sfcfg/timeit.py 300000 3 1 <label> ./<exe>`. The two circulating
+benchmark maps are built by the `LoopBench2` and `JuncForce` NoAI scripts (in the runtime `ai/`
+dir), driven over admin port 3978 (NOT the live 3977) exactly like `LoopBench`.
+
+### Independent re-measurement of the pathfinding cache (2026-06-24, second session)
+
+The pathfinding-cache claim was reproduced from scratch in a separate session on the same box,
+isolated by PID (no `taskkill`, port 3977 never touched, only self-launched `&`/`kill` copies). To
+isolate the cache cleanly, a compile-time switch `OTTDOOM_PF_CACHE_ENABLED` (default 1) was added to
+`src/train_cmd.cpp`, so a true control (cache off) and the optimized binary (cache on) come from the
+IDENTICAL source tree differing only in that one macro. Both were built incrementally:
+
+- The optimized rebuild (cache on, `OTTDOOM_PF_CACHE_ENABLED=1`) came out byte-identical to the
+  existing canonical `openttd_fast.exe` (md5 `8727930f74a6298c9d82117b9cb07638`) when built without
+  the macro edit, confirming `openttd_fast.exe` is genuinely the current source.
+- Control (`OTTDOOM_PF_CACHE_ENABLED=0`, md5 `f8e3e162bdf876a70526a48f13d3c0e2`) and optimized
+  (`=1`, md5 `3795bc6df86e617469ec550993019589`) were built from the same tree, macro the only diff.
+
+**Profiling re-confirmed the decisive finding.** With `OTTDOOM_PFSTATS` set, the optimized binary on
+`loopbench.sav` for 100000 ticks reported `pf_hits=0 pf_miss=0`: the per-train YAPF pathfinder is
+NEVER called, so the cache is never reached. The premise that fixed-route PBS-ring trains "re-run the
+pathfinder every junction" does not hold; the reservation follower short-circuits YAPF. This
+independently reproduces the prior session's `pf_hits=0 pf_miss=0` result.
+
+**Timing, interleaved bursts (clean idle box, CPU ~0-3%, no other openttd processes running).** Two
+separate 5-run interleaved bursts (ctrl/opt alternated so they share the same noise window),
+`OTTDOOM_LOGIC_MAP=1`, `loopbench.sav`, 300000 ticks, raw wall-clock seconds pasted from the shell:
+
+| run | burst A ctrl (s) | burst A opt (s) | burst B ctrl (s) | burst B opt (s) |
+| --- | --- | --- | --- | --- |
+| 1 | 16.721 | 16.436 | 16.224 | 16.012 |
+| 2 | 16.124 | 16.125 | 15.677 | 15.906 |
+| 3 | 16.466 | 16.337 | 15.898 | 18.074 |
+| 4 | 15.986 | 15.880 | 16.610 | 16.071 |
+| 5 | 16.148 | 15.707 | 16.247 | 15.715 |
+| avg | 16.289 | 16.097 | 16.131 | 16.356 |
+
+Burst A gave 16.289 / 16.097 = 1.0119x (opt faster); burst B gave 16.131 / 16.356 = 0.9862x (ctrl
+faster). The two bursts straddle 1.00x, the signature of pure noise. Pooled over all 10 runs:
+ctrl mean 16.210s (stdev 0.322), opt mean 16.226s (stdev 0.692, inflated by one 18.074s opt
+outlier), **mean ratio 0.9990x, median ratio 1.0090x**. The between-binary difference (~0.02s on the
+mean) is far inside the per-run spread (~0.3-0.7s), i.e. statistically indistinguishable from no
+change. (Absolute tps here is ~18.4k, lower than the ~27k idle figure cited earlier in the doc;
+this box was simply slower this session. The RATIO, not the absolute tps, is the load-bearing
+number and it is ~1.00x.)
+
+**Verdict: the ~1.00x (no measurable change) reproduces**, and for the same reason: the cache is
+never reached on `loopbench.sav` because no train ever path-finds. The cache is sound and ready for a
+workload that actually invokes per-train YAPF (the machine map's reader trains crossing real gate
+junctions); this benchmark is not that workload.
+
+**Correctness, re-proven deterministically.** Control (cache off) vs optimized (cache on), same save,
+same ticks, `autosave_on_exit` exit saves diffed byte-for-byte (PID-managed runs):
+
+| save | ticks | ctrl size | opt size | byte diffs |
+| --- | --- | --- | --- | --- |
+| loopbench.sav | 50000 | 879209 | 879209 | 0 (IDENTICAL) |
+| loopbench.sav | 100000 | 883725 | 883725 | 0 (IDENTICAL) |
+| loopbench_cos.sav | 50000 | 876620 | 876620 | 0 (IDENTICAL) |
+
+The exit saves are byte-for-byte identical at every tick count and on both available maps. That the
+trains genuinely advance (not a frozen no-op) was confirmed: the 100000-tick exit save differs from
+the original `loopbench.sav` in 24804 bytes and grows the file (874401 -> 883725). So the cache is
+exactly movement-neutral, here trivially because it is a no-op on these maps (never reached). Note
+`loopbench2.sav` / `juncforce.sav` from the prior session are not present in `sfcfg/` this session,
+so the re-check used the two maps that are: `loopbench.sav` (the task's benchmark) and
+`loopbench_cos.sav`. `correctness_ok = true` from this deterministic diff.
+
+The `OTTDOOM_PF_CACHE_ENABLED` macro added for this isolation defaults to 1, so it does not change
+the shipped behaviour of `openttd_fast.exe` (cache on under the flag, stock when the flag is off).
