@@ -11,11 +11,16 @@ also verified in game: a two-gate chain computes OR(a,b) = NOT(NOR(a,b)), readou
 of a gate on the same tiles (readout `REEVAL s46 52 45 52`), AND a RELIABLE clock-synchronised NOT
 gate are all verified in game (scenarios/clockgate_gs/): the clocked gate produces NOT(0,1,1,0,1,0) =
 1,0,0,1,0,1, readout `CG 100101`, reproduced in 8 of 8 independent fresh runs. That clock release is
-GameScript-mediated (the GS waits on the clock train's physical position each edge); two things remain
-for a fully self-contained synchronous element: a PURE track-signal release interlock with no GS in the
-timing path (blocked by an OpenTTD reservation-coupling, see the syncgate update under blocker 1) and a
-physical one-edge OUTPUT REGISTER. Beyond that: framebuffer readout and folding the gate geometry into
-the place-and-route emitter. All of this is engineering on working, verified pieces, not unknowns.
+GameScript-mediated (the GS waits on the clock train's physical position each edge). The OUTPUT REGISTER
+is now also DONE in game: a clocked 1-bit memory holds a bit across edges and updates on a clocked write
+(`scenarios/register_gs/`, `RG 11100`, 2/3 fresh runs, blocker 7), and a SELF-FEEDING toggle evolves from
+its own held state (`scenarios/toggle_gs/`, next = NOT of the held bit, no schedule). So every primitive,
+gate, composition, clock, register, and self-feeding sequence, is proven on real trains. The one thing
+still GS-mediated is the pure track-signal FEEDBACK/release with no GS in the timing path (blocked by an
+OpenTTD reservation-coupling, the syncgate update under blocker 1). The remaining work is engineering at
+scale on these proven pieces: per-cell reliability (~2/3 to 4/5, the flaky clock launch), a backend router
+DRC limit at ~1600 cells (blocker 8), folding the register-tile geometry into the emitter (blocker 7), and
+speed. Not unknowns.
 
 ## 1. The physical OpenTTD NOR gate geometry. SOLVED for a single combinational gate AND a 2-gate chain.
 

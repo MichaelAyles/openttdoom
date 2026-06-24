@@ -20,77 +20,72 @@ OpenTTD map.*
 ## Where we are
 
 "A DOOM frame rendered in OpenTTD" has two readings. The easy one, a DOOM-style frame shown
-as pixels on the map, is **done**: we run a raycaster ROM, get a 64x32 frame, and stamp it onto
-the map as tiles (see the frame images below). The real goal is the hard one, a DOOM frame
+as pixels on the map, is **done**: we compute a gorgeous 1-bit raycaster frame and stamp it onto
+the map as tiles (see the images below). The real goal is the hard one, a DOOM frame
 **computed by the train-built machine** and lit up on its own signal display. Progress toward
 that:
 
 ```
-Machine-computed DOOM frame:  [#######-----------------------]  ~23%
+Machine-computed DOOM frame:  [#########---------------------]  ~30%
 ```
 
-That number is deliberately honest: every research UNKNOWN is now retired (a gate computes,
-gates compose, there is a clock, the toolchain compiles a circuit to a map, the workload
-renders, and the box can even build OpenTTD from source), but the remaining ~80% is
-construction at scale (the full CPU, built as thousands of computing gates, run fast enough to
-finish a frame), which is large but no longer a mystery.
+That number is deliberately honest. Every research UNKNOWN is now retired: a gate computes,
+gates compose, there is a self-sustaining clock, a **clocked register holds a bit across edges**,
+a **self-feeding machine evolves from its own held state**, the toolchain compiles BOTH a small
+CPU and a hardwired raycaster FSM (and verifies them gate for gate), and the 1-bit workload is
+made genuinely good-looking. What remains is no longer a mystery, it is CONSTRUCTION at scale:
+building a machine of ~1400 gates plus registers reliably (per-cell reliability is ~2/3 to 4/5
+today, and reliability compounds), and running it fast enough to finish a frame. The hard
+science is done; the hard engineering is not.
 
-### Milestones achieved (all verified, most in game)
+### Milestones achieved (verified in software, and the marked ones on real trains)
 
-- **The toolchain compiles a circuit to an OpenTTD map**, verified end to end in software: a
-  4-bit adder and an 8-bit CHIP-8 ALU both go HDL to netlist to NOR to place-and-route to
-  scenario with the logic preserved at every step. Routing reaches 100 percent via perpendicular
-  bridges, and a real yosys techmap is wired in (adder 92 to 62 NOR cells, ALU 891 to 442).
-- **The workload renders**: a complete CHIP-8 interpreter passes the Timendus reference ROMs by
-  exact hash, and a from-scratch raycaster ROM draws a pseudo-3D maze.
-- **A frame is rendered as on-map pixels**: the IBM logo and a raycaster frame stamped straight
-  into a savegame as rail tiles (the direct save writer does the 4-bit adder, ~40k tiles, in
-  ~0.3s).
-- **A logic gate computes in OpenTTD**: a 2-input NOR, truth table 1,0,0,0, independently
-  re-verified.
-- **Gates compose**: a 2-gate chain computing OR = NOT(NOR), 0,1,1,1, triple-verified.
-- **A clock train and live re-evaluation** of a gate on the same tiles, verified.
-- **A reliable clock-synchronised NOT gate**: output NOT(0,1,1,0,1,0) = 1,0,0,1,0,1, reproduced
-  8 of 8 independent fresh runs.
-- **OpenTTD builds from source on this box** (MSVC 2022 + vcpkg + CMake), so the speed fork is no
-  longer environment-blocked, and a first fork already gives about 3x on a bare map.
-- **The toolchain emits a cell that COMPUTES**: a NOR2 netlist goes through place-and-route and
-  the GameScript stamps the verified computing geometry at the placed position (not hand-coded),
-  and it computes 1,0,0,0 = NOR in OpenTTD, reproduced across fresh runs. This is the first time
-  the pipeline produces working hardware, not just a picture of it.
+The toolchain (software, verified gate for gate):
+- **It compiles circuits AND clocked machines to NOR**: a 4-bit adder, an 8-bit CHIP-8 ALU, a
+  small **stored-program CPU**, and a hardwired **raycaster FSM** all go HDL to netlist to NOR to
+  place-and-route, with the logic preserved (a real yosys techmap is wired in). The sequential
+  spine is real: a **register cell** lowered to an all-NOR master-slave latch, a cycle-stepping
+  simulator, sequential equivalence, and register place-and-route with a clock-distribution net.
+- **A CPU computes Fibonacci**: a lean 8-bit accumulator CPU emits 1,1,2,3,...,233 then overflows,
+  identical across the behavioural sim, the gate netlist, the all-NOR lowering, and the netlist
+  reconstructed from placement. It is a real program (swap the ROM, change the output).
+- **A raycaster FSM draws the frame bit-for-bit**: a hardwired state machine (not a CPU, ~84 state
+  bits, one ALU) reproduces the gorgeous oracle exactly over a heading sweep.
+- **The 1-bit workload is made good-looking**: a complete CHIP-8 interpreter (Timendus ROMs by
+  exact hash) plus a from-scratch raycaster, upgraded with Bayer depth dithering, floor and
+  ceiling, edge seams and texture at 64x32 and 96x48, pinned by hash and playable (`golden/play.py`).
 
-### Key blockers to a machine-computed DOOM frame
+In OpenTTD, on real trains (judged from raw train positions, never from script):
+- **A gate computes** (2-input NOR, 1,0,0,0), **gates compose** (OR = NOT(NOR), 0,1,1,1), and the
+  toolchain **emits a computing cell** from a netlist (not hand-coded).
+- **A self-sustaining clock** plus a **reliable clock-synchronised gate** (8/8 fresh runs).
+- **A clocked REGISTER holds a bit** across clock edges and updates on a clocked write
+  (`RG 11100`, 2 of 3 fresh runs) - the memory primitive that gated everything.
+- **The machine REMEMBERS**: a self-feeding 1-bit toggle whose next state is NOT of its OWN held
+  bit, 0,1,0,1, with no schedule (3 of 4, 4 of 4 across two agents).
+- **Shown in-game**: the gorgeous raycaster frame stamped as on-map signal tiles, a rail portrait
+  of a placed circuit, and clock-stepped Fibonacci (1,1,2,3,5,8,13) running on real gate lanes.
+- **OpenTTD builds from source here** (MSVC 2022), and a first speed fork gives ~3x on a bare map.
 
-1. **No self-contained clock yet.** The clocked gate works but the per-edge release is
-   GameScript-mediated. A pure track-signal interlock failed on an OpenTTD reservation-coupling
-   (reading the clock block's occupancy stalls the clock), and there is no physical output
-   register. A real machine needs a self-sustaining clock and a one-edge latch.
-2. **Multi-cell wiring at scale.** A single emitted cell computes, and a 2-cell circuit now does too:
-   an emitted OR = NOT(NOR) computes 0,1,1,1, with the bit carried physically over a track spur (the
-   placer co-locates the consumer under its driver so the coupling is the proven short vertical spur).
-   The mechanism is verified, but its reliability is still flaky under load (train-dispatch races), and
-   it only covers a 2-stage chain with fan-out 1. Generalising the co-location to fan-out greater than
-   one, deeper chains, and wider gates, reliably, is the work between here and emitting the whole adder.
+### What stands between here and a machine-computed frame
 
-1. **No self-contained clock yet.** The clocked gate works but the per-edge release is
-   GameScript-mediated. A pure track-signal interlock failed on an OpenTTD reservation-coupling
-   (reading the clock block's occupancy stalls the clock), and there is no physical output
-   register. A real machine needs a self-sustaining clock and a one-edge latch.
-2. **The emitter stamps placeholder track, not computing cells.** The verified NOR-gate geometry
-   exists, but `place_and_route` to GameScript (`StampCell`) still lays illustrative track. Until
-   the real geometry is folded in, the pipeline draws the CPU's floor plan, it does not build a
-   working one.
-3. **The machine does not exist yet.** Only a 4-bit adder and an 8-bit ALU exist as netlists. A
-   CHIP-8 CPU also needs a register file, instruction decoder, memory, and a display driver, none
-   of which are built, then all of it assembled as thousands of computing gates on the map.
-4. **Speed.** Even fully built, computing one CHIP-8 frame at stock OpenTTD speed is impractically
-   slow (a 4-bit adder's carry took about two in-game months in the classic constructions). A first
-   speed fork now exists and is verified: a runtime flag that strips the per-tick map housekeeping
-   useless on a logic map (the cosmetic tile loop, town/tree/industry/station updates) while keeping
-   the train and signal core, measured at about 3x on a bare map (see `docs/speed_fork.md` and
-   `docs/speed_fork.patch`). That 3x is the fixed housekeeping removed; it shrinks toward 1x as the
-   train count grows, so the deeper lever, pathfinding and per-train hot-path surgery for the fixed
-   reader and clock routes, is the real remaining speed work.
+The primitives are all proven, so the remaining blockers are engineering, not unknowns:
+
+1. **Scale and reliability (the central one).** Every in-game primitive works, but at 1 to 3 cells
+   and ~2/3 to 4/5 reliability (a roughly 1-in-3 flaky clock LAUNCH, and train-dispatch races). A
+   full raycaster FSM is ~1400 NOR cells plus ~84 registers, and reliability compounds, so building
+   a machine that size reliably is the heart of the remaining work.
+2. **Router DRC at scale.** The CPU and the FSM route 100 percent of their nets with the clock
+   reaching every register, but the constructive channel router throws ~410 DRC shorts at ~1600
+   cells (a backend scale limit, STUCK.md #8); the largest designs are not DRC-clean yet. The adder
+   (92 cells) and the ALU (893 cells) route clean.
+3. **Pure-hardware feedback.** The register and the self-feeding toggle work, but their write-BACK
+   is GameScript-mediated; a pure track-signal feedback loop hits an OpenTTD reservation-coupling
+   (the syncgate blocker). A fully self-contained sequential element needs that solved.
+4. **Speed.** A frame is on the order of 1600 cycles on a huge machine. A first speed fork gives
+   ~3x on a bare map (a runtime flag stripping per-tick housekeeping useless on a logic map) but
+   shrinks toward 1x as trains scale; the deeper lever is pathfinding and per-train hot-path surgery
+   (`docs/speed_fork.md`, `docs/speed_fork.patch`).
 
 ## The in-game breakthroughs
 

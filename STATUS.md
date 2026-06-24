@@ -3,20 +3,24 @@
 End-of-run status for openttdoom. What works, what is stubbed, and where the hard
 problems sit. Plain tone, no em-dashes. The isolated blockers are in STUCK.md.
 
-This run stood up the toolchain spine (M0 to M4) and pushed the 4-bit adder as far as
-software verification can take it. The whole pipeline closes in software, with the adder
-fully placed AND fully routed. The one thing that does not close is the physical OpenTTD
-gate, which is the research problem the brief flagged as hardest, and it is isolated cleanly
-for the human.
+The toolchain spine (M0 to M4) is up and the work has gone well past it. In software the whole
+pipeline closes for a 4-bit adder, an 8-bit ALU, a small stored-program CPU and a hardwired
+raycaster FSM (HDL to netlist to NOR to place-and-route to equivalence), including a full
+SEQUENTIAL spine: a register cell lowered to an all-NOR master-slave latch, a cycle-stepping
+simulator, sequential equivalence, and register place-and-route with a clock-distribution net.
+The CPU computes Fibonacci and the FSM reproduces the gorgeous 1-bit raycaster bit-for-bit.
 
-Two of the four originally-isolated blockers were then closed (see the history at the bottom):
-routing now reaches 100 percent via perpendicular bridge crossings, and a full yosys
-(oss-cad-suite) now runs the proper verilog to NOR synthesis, verified equivalent to the
-Python flow. The remaining blockers are the physical gate geometry and the GameScript runtime.
+In OpenTTD on real trains, the research unknowns are retired: a NOR gate computes, gates compose,
+the toolchain emits a computing cell, a self-sustaining clock runs, a clock-synchronised gate is
+reliable (8/8), a clocked REGISTER holds a bit across edges and updates on a clocked write
+(`RG 11100`, 2/3), and a self-feeding 1-bit toggle evolves from its own held state (the machine
+remembers). All judged from raw train positions. The remaining problems are engineering at scale,
+not unknowns: a backend router DRC limit at ~1600 cells (STUCK.md #8), per-cell reliability of
+~2/3 to 4/5 (the flaky clock launch), the GS-mediated write-back (the pure-feedback reservation
+coupling), and speed. See README.md "Where we are" for the headline picture.
 
-Total test count: 267 passing (`python -m pytest -q`), of which 20 are the M5 accumulator-CPU
-suite (`hdl/test_cpu.py`). (The non-CPU count grew past the 225 noted earlier as parallel tracks
-landed; the M5 work added the 20 CPU tests and left every other test green.)
+Total test count: 381 passing (`python -m pytest -q`), spanning the golden model, the HDL (adder,
+ALU, CPU, raycaster FSM), the synth/register/sequential spine, and place-and-route.
 
 ## Milestone by milestone
 
