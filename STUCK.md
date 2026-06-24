@@ -404,3 +404,29 @@ OpenTTD. `hdl/test_cpu.py::test_cpu_places_routes_completely` and
 `hdl/test_raycaster_pipeline.py::test_larger_cone_routes_all_nets_drc_clean` now assert the clean
 result. (Earlier suggested router-level ideas, more riser columns / clock H-tree / second pass, were
 not needed: the failures were specific wide-fan-in and pad-column geometry, not a global crowding wall.)
+
+## 9. Self-feeding multi-gate composition: the reused-lane choreography wall, and the fixed-lane fix.
+
+The self-feeding 1-bit TOGGLE works (`scenarios/toggle_gs/`, next = NOT held Q, no schedule). Scaling
+the same idea to a self-feeding FIBONACCI (`scenarios/selffib_gs/`: two 2-bit registers a,b held as
+parked trains, next = a+b via a real block-signal NOR full adder, shift a <- b and b <- next, all read
+from RAW positions, no Fibonacci array) does NOT complete. The design is genuinely self-feeding,
+source-audited: next is built ONLY from the raw gate-read sum bits and carry, never from av+bv arithmetic
+in Squirrel, and the write-back is the same GS-mediated boundary as the toggle. The pieces work
+individually in fresh runs: the registers self-feed-read a=0, b=1 from their held trains 6/6, and a
+single adder NOR computes correctly (`diag.nut`: NOR truth table from raw reader x). The 9-NOR full
+adder is exhaustively correct in Python over all 8 input rows.
+
+What it hits: a full a+b edge requires about 18 SEQUENTIAL block-signal reads on ONE REUSED gate lane,
+and the OpenTTD train choreography between reads (dispose each read's reader and tap trains, then launch
+the next reader out of its depot) is only about 2/3 to 4/5 reliable per dispatch. So 0.7^18 is
+effectively zero and every fresh run dies at a gate or register read (readout `FF g` / `FF e`) before
+producing even the first term. ZERO terms self-fed end to end across six fresh runs.
+
+This concretely pins the central scale blocker. The FIX (identified, not built): a FIXED PHYSICAL NOR
+NETWORK, each gate its own lane with the held register and carry trains coupled in through fixed
+signal-free spurs (the norchain composition), so NO per-gate train is re-parked or disposed between
+reads. That is exactly why the toggle, one fixed gate read of the held bit with no tap-parking, was
+reliable. The reused-single-lane, GS-dispatched-per-read architecture hits the wall; a build-once fixed
+network is the path. Same lesson as the SC2 work, now with the precise mechanism for a sequential
+datapath.
