@@ -330,8 +330,22 @@ def route_nets(netlist: Netlist, placement: Placement,
                              left_pad_demand=len(input_pads) + len(clock_pads))
 
     # 2. Remap IO pads into the widened coordinates. Input pads and clock source pads stay at
-    #    x = 0 (left edge); output pads move to just past the widened logic.
-    new_right_x = placement.width_tiles + 1
+    #    x = 0 (left edge); output pads move to just past the widened logic, with a RESERVED
+    #    routing channel between the logic and the pad column.
+    #
+    #    Output pads are stacked one-per-row in a single column on the right edge. Each output
+    #    net routes its pad like any consumer: a riser drops from the pad's row to the net's trunk
+    #    band. Those pad risers all want clear columns just WEST of the pad column, and a
+    #    left-escaping pad scans west for one (see _assign_riser_columns). With no channel
+    #    reserved there, the few free columns between the logic and the pads run out after a dozen
+    #    pads, and later pads fall back to a column EAST of the pad column, whose riser then cuts
+    #    across the other stacked pads (a route_cuts_pad + the resulting route_short). This is the
+    #    mirror of the left margin _widen_placement reserves for input/clock pads: give the output
+    #    side its own clear band, two columns per pad plus slack, so every pad riser lands west of
+    #    the pad column in clear space and never crosses a neighbouring pad.
+    SP = 2
+    out_channel = SP * len(output_pads) + CHANNEL_SLACK + 2 if output_pads else 0
+    new_right_x = placement.width_tiles + 1 + out_channel
     for net in list(input_pads):
         x, y = input_pads[net]
         input_pads[net] = (0, y)
@@ -402,14 +416,52 @@ def route_nets(netlist: Netlist, placement: Placement,
                     path_set.add(t)
                     path_tiles.append(t)
 
-        riser_xs: List[int] = []
+        # Coalesce this net's pins that are STACKED on one cell edge: same escape side, same
+        # column x, and CONSECUTIVE rows. The textbook case is a NOR whose lowering REPEATS an
+        # input (NOR(a,a,a,a)): the placer gives each repeat its own west-edge tile on adjacent
+        # rows, all carrying the same net. Routing each repeat as its OWN stub+riser fills a
+        # solid rectangle of tiles (every row a stub, every claimed column a riser); that 2D blob
+        # is classified "X" (not a straight pass-through), so a FOREIGN net's straight riser
+        # crossing it is an illegal non-perpendicular share, the residual route_short seen at
+        # CPU/raycaster scale. The fix joins each run of stacked same-net pins with ONE vertical
+        # segment along their shared pin column (every tile on it is a legal pin of THIS net, so
+        # it cuts no cell and shorts nothing) and drops a SINGLE stub+riser from the run's top
+        # row. The net still physically reaches every pin (reconstruction unchanged), but its
+        # geometry near the cell is a clean line, not a blob, so perpendicular crossings stay
+        # perpendicular. We only coalesce CONSECUTIVE rows on one column, never pins that merely
+        # share a column across different cells in a placement column (those are ROW_GAP apart,
+        # so a join would cut the cells between them); each of those stays its own riser exactly
+        # as before. Logic is untouched: same pins, same net, same connectivity.
+        by_col: Dict[Tuple[str, int], List[int]] = {}
         for i in idxs:
             p = all_pins[i]
-            rx = riser_of[i]
-            add(_hline(p.y, p.x, rx))      # stub: pin -> riser column on the pin's row
-            add(_vline(rx, p.y, ty))       # riser: down to the trunk row
+            by_col.setdefault((p.side, p.x), []).append(i)
+
+        runs: List[List[int]] = []
+        for (side, px), gidxs in by_col.items():
+            gidxs.sort(key=lambda i: all_pins[i].y)
+            run = [gidxs[0]]
+            for i in gidxs[1:]:
+                if all_pins[i].y == all_pins[run[-1]].y + 1:
+                    run.append(i)              # contiguous stacked pin: extend the run
+                else:
+                    runs.append(run)
+                    run = [i]
+            runs.append(run)
+
+        riser_xs: List[int] = []
+        for run in runs:
+            px = all_pins[run[0]].x
+            y0 = all_pins[run[0]].y
+            y1 = all_pins[run[-1]].y
+            if len(run) > 1:
+                # join the stacked same-net pins with one vertical run on their pin column.
+                add(_vline(px, y0, y1))
+            rx = riser_of[run[0]]              # anchor on the run's top pin
+            add(_hline(y0, px, rx))            # stub: pin column -> riser column on the top row
+            add(_vline(rx, y0, ty))           # riser: down to the trunk row
             riser_xs.append(rx)
-            used_h = max(used_h, p.y + 1)
+            used_h = max(used_h, y1 + 1)
             used_w = max(used_w, rx + 1)
 
         add(_hline(ty, min(riser_xs), max(riser_xs)))   # trunk joins all risers

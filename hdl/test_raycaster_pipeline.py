@@ -213,9 +213,9 @@ def test_advance_slice_routes_drc_clean_and_reconstructs():
 
 
 def test_advance_cone_advance_only_is_the_clean_slice():
-    # the advance cone WITHOUT the frac pick is the DRC-clean routable slice; with_frac is one
-    # output pad wider and trips the shared router's edge-pad fallback. Both compute the advance
-    # bits identically; this pins which form routes clean and that the advance is unchanged.
+    # the advance cone with and without the frac pick both route DRC-clean now that the router
+    # reserves an output-pad channel (the with_frac form used to trip the shared router's edge-pad
+    # fallback). Both compute the advance bits identically; this pins that the advance is unchanged.
     plain = build_cast_advance_cone_netlist(12, with_frac=False)
     full = build_cast_advance_cone_netlist(12, with_frac=True)
     assert set(plain.ports.outputs) == {f"nx{i}" for i in range(8)} | {f"ny{i}" for i in range(8)}
@@ -332,20 +332,19 @@ def test_cycles_per_frame_reported():
     print("raycaster FSM cycles/frame (heading 0):", cyc)
 
 
-def test_larger_cone_routes_all_nets_but_hits_router_scale_limit():
-    # HONEST NEGATIVE, documented: a larger cone routes 100 percent of NETS through the shared
-    # channel router but with route_short / route_cuts_pad DRCs, the exact STUCK.md #8 riser /
-    # edge-pad crowding scale limit (the 92-cell adder and the advance-only slice route 0-DRC
-    # through the same router). This pins that the shorts are a backend scale wall, not a raycaster
-    # logic fault: the cone is proven correct above, and every net still routes. We use the ~484-NOR
-    # advance+frac cone (one output pad over the clean advance-only slice) as the cheap, fast
-    # exemplar of the limit; the ~1419-NOR paint and ~1802-NOR shade cones trip it harder (reported
-    # in the run notes, not re-routed here, since their large maps are slow to DRC-check).
+def test_larger_cone_routes_all_nets_drc_clean():
+    # Previously the HONEST NEGATIVE (STUCK.md #8): the ~484-NOR advance+frac cone routed every net
+    # but tripped a route_cuts_pad + route_short because its 20 output pads, stacked one-per-row in a
+    # single right-edge column, exhausted the few free columns west of them and pushed later pad
+    # risers east of the pad column, where they cut the neighbouring pads. The router now reserves an
+    # output-pad channel (two columns per pad plus slack) west of the pad column, the mirror of the
+    # input-side left margin, so every pad riser lands in clear space. With that and the wide-fan-in
+    # footprint/coalesce fixes, this cone routes 100 percent of nets DRC-clean, like the adder, the
+    # ALU, the CPU, and the ~1419-NOR paint cone (all 0 DRC through the same shared router).
     low = build_cast_advance_cone_netlist(12, with_frac=True).to_nor()
     rep = route_slice_report(low)
     assert rep["routed"] == rep["total_nets"], "every net must still route"
     assert rep["unrouted"] == 0
-    # at this scale the shared router takes its documented fallback (route_short / route_cuts_pad).
-    assert rep["drc_violations"] > 0
+    assert rep["drc_violations"] == 0, f"DRC: {rep['drc_kinds']}"
     print("advance+frac cone route status:", rep["routed"], "/", rep["total_nets"],
           "nets, DRC", rep["drc_violations"], rep["drc_kinds"])

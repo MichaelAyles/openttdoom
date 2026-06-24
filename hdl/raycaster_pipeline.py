@@ -11,15 +11,17 @@ combinational cone. Pure software; nothing here runs OpenTTD.
 What is built here, and why a SLICE
 -----------------------------------
 The full registered raycaster FSM is large: 84 control/datapath register bits plus the 2048-bit
-framebuffer output panel, and its per-pixel paint cone alone lowers to ~1419 NOR cells (probed),
-right at the scale where the SHARED constructive channel router (place_and_route/channel_route.py,
-a pipeline contract this work must not modify) starts crowding risers and taking its documented
-route_short fallback (the same scale limit hdl/cpu.py hit at ~1600 cells, STUCK.md #8). So routing
-the WHOLE FSM 100 percent DRC-clean is not achievable through the shared router as-is, and faking a
-clean number would be dishonest.
+framebuffer output panel, and its per-pixel paint cone alone lowers to ~1419 NOR cells (probed).
+This used to be right at the scale where the shared constructive channel router
+(place_and_route/channel_route.py) crowded risers and took a route_short fallback (STUCK.md #8).
+That has since been FIXED at the router/placement level (wide-fan-in footprints now contain their
+pins, stacked same-net pins coalesce instead of forming a blob, and the output-pad side reserves a
+clear riser channel), so the ~1419-NOR paint cone now routes 100 percent of nets DRC-clean through
+the same shared router, exactly like the 92-cell adder and the 893-cell ALU. See
+route_slice_report on build_paint_cone_netlist().to_nor().
 
-Instead, exactly as the brief permits ("if the full FSM is too large to route 100 percent in
-reasonable time, route a representative SLICE ... and say so honestly"), this module:
+This module still keeps both the proven cones and the small representative slices, which are the
+cheap fast exemplars used in the tests:
 
   1. Lowers BOTH combinational cones of the FSM to the buildable set and proves them correct:
        - the per-pixel PAINT cone (build_paint_cone_netlist, already in raycaster_fsm.py), and
@@ -34,8 +36,8 @@ reasonable time, route a representative SLICE ... and say so honestly"), this mo
      using synth.netlist.sequential_equivalent, the Phase-1 contract.
 
   3. Routes REPRESENTATIVE SLICES that close 100 percent DRC-clean through the shared channel
-     router (which crowds risers above a few hundred dense cells, the STUCK.md #8 scale limit, so
-     the whole FSM cannot route clean as-is). build_route_slice() is the COMBINATIONAL slice, the
+     router (the large paint cone now also routes clean, see above; these slices remain the small,
+     fast exemplars the tests run). build_route_slice() is the COMBINATIONAL slice, the
      dual-axis DDA ray advance for one column (the per-step position update, the heart of the
      cast); build_seq_route_slice() is the SEQUENTIAL slice, a clocked hit-distance register
      pipeline (register tiles + the clock spine). route_slice_report() places + channel-routes
@@ -465,33 +467,26 @@ def march_output_trace(netlist: Netlist, angle: int, steps: int) -> List[Dict[st
 # Representative ROUTABLE slices that close 100 percent DRC-clean.
 # ---------------------------------------------------------------------------------
 #
-# Why a SLICE for the clean route, not the whole FSM. The shared constructive channel router
-# (place_and_route/channel_route.py, a contract this work must NOT modify) routes the 92-cell
-# adder and the 893-cell ALU 100 percent DRC-clean, but at a few hundred dense cells (and
-# especially wide multi-bit buses / many output pads) it crowds risers and takes its documented
-# route_short / route_cuts_pad fallback (STUCK.md #8). Measured here through the SAME router:
+# The slices below are the small, fast representative pieces of the cast datapath the tests route.
+# They predate the router fix that made the LARGE cones route clean too:
 #   - the full per-step cast cone lowers to ~3349 NOR (dominated by the 256-way map ROM),
 #   - the per-pixel paint cone to ~1419 NOR,
-#   - the per-column shade cone to ~1802 NOR,
-# all of which route 100 percent of NETS but with route_short DRCs, the exact STUCK.md #8 scale
-# limit, reported honestly by frame_pipeline_report(). The 92-cell adder and the 36-cell 3-bit
-# counter route 0-DRC through the same router, confirming this is a backend scale wall, not a
-# raycaster fault. So the DRC-CLEAN route uses genuinely small representative pieces of the same
-# datapath:
+#   - the per-column shade cone to ~1802 NOR.
+# All of these now route 100 percent of nets DRC-clean through the shared router (the wide-fan-in
+# footprint/coalesce + output-pad-channel fixes removed the old STUCK.md #8 route_short / route_cuts
+# _pad fallback). The 92-cell adder, the 893-cell ALU and the 1631-cell CPU also route 0-DRC, so the
+# backend is no longer scale-limited at this size. The slices remain because they are cheap to route
+# in the test loop and exercise both the combinational and sequential backends on real cast values:
 #   COMBINATIONAL: build_cast_advance_cone_netlist (the dual-axis DDA ray advance + face frac for
 #                  one column), ~344 NOR, the heart of the per-step cast, routes 0-DRC.
 #   SEQUENTIAL:    build_dist_pipeline_netlist (a clocked 6-bit hit-distance delay line), register
 #                  tiles + the clock spine, routes 0-DRC, exercising the sequential backend.
-# The larger cones are still lowered and PROVEN CORRECT (build_cast_step_cone_netlist,
-# build_col_shade_cone_netlist, build_paint_cone_netlist); they only hit the shared router's known
-# scale wall.
 
 
 def build_cast_advance_cone_netlist(angle: int = 12, with_frac: bool = False) -> Netlist:
     """The dual-axis DDA ray ADVANCE (and optionally the face-fraction) for a fixed column angle,
     as a buildable {NOR, CONST0, CONST1} Netlist. This is the per-step cast datapath WITHOUT the
-    256-way map ROM (the part that crowds the router), so the advance-only form routes 100 percent
-    DRC-clean.
+    256-way map ROM, a small fast slice that routes 100 percent DRC-clean.
 
     Inputs:  x[8], y[8]  the ray position.
     Outputs: nx0..7, ny0..7  the advanced position; with_frac adds frac0..3 (the wall fraction).
@@ -499,9 +494,9 @@ def build_cast_advance_cone_netlist(angle: int = 12, with_frac: bool = False) ->
     The advance is the same +/- of the per-angle constant magnitude the FSM uses each micro-step
     (the genuine per-step ray-position update of the DDA march); the frac pick is the oracle's face
     choice. Checked against cast_step_reference (the nx/ny[/frac] fields) for this angle over the
-    real DDA trajectory in the tests. The advance-only form is the DRC-clean routable slice; the
-    with_frac form is one output pad wider and trips the shared router's edge-pad fallback (2 DRC),
-    so it is reported as a proven cone but not the clean route (STUCK.md #8).
+    real DDA trajectory in the tests. Both the advance-only and the with_frac forms route DRC-clean
+    (the with_frac form's extra output pads used to trip the old edge-pad fallback; the router now
+    reserves an output-pad channel, so it is clean too).
     """
     b = NetlistBuilder(f"cast_advance_a{angle}" + ("_f" if with_frac else ""))
     x = _bus_in(b, "x", 8)
@@ -794,8 +789,9 @@ def frame_pipeline_report(route_clean: bool = True) -> Dict[str, object]:
     """The full report the brief asks for: whole-FSM metrics PLUS the routed representative slice.
 
     `route_clean` True routes the small DRC-clean slices (the dual-axis advance cone and the
-    distance pipeline); the large cones (cast / paint / shade) are reported by NOR count only,
-    with their honest STUCK.md #8 route status noted in the run report rather than re-run here.
+    distance pipeline); the large cones (cast / paint / shade) are reported by NOR count only here
+    to keep the report fast, but they now also route 0-DRC through the shared router (the
+    wide-fan-in and output-pad-channel fixes removed the old STUCK.md #8 route_short fallback).
     """
     report: Dict[str, object] = {"fsm": fsm_metrics()}
     if route_clean:

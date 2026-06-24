@@ -17,10 +17,13 @@ is now also DONE in game: a clocked 1-bit memory holds a bit across edges and up
 its own held state (`scenarios/toggle_gs/`, next = NOT of the held bit, no schedule). So every primitive,
 gate, composition, clock, register, and self-feeding sequence, is proven on real trains. The one thing
 still GS-mediated is the pure track-signal FEEDBACK/release with no GS in the timing path (blocked by an
-OpenTTD reservation-coupling, the syncgate update under blocker 1). The remaining work is engineering at
-scale on these proven pieces: per-cell reliability (~2/3 to 4/5, the flaky clock launch), a backend router
-DRC limit at ~1600 cells (blocker 8), folding the register-tile geometry into the emitter (blocker 7), and
-speed. Not unknowns.
+OpenTTD reservation-coupling, the syncgate update under blocker 1). Two of the engineering blockers have
+since been CLOSED: the flaky clock LAUNCH is fixed (a one-toggle-per-settle egress + teardown-retry, 10/10
+clkOK, was ~2/3, the shared helper in `scenarios/clockgate_gs/main_clocked.nut`), and the backend router
+DRC limit is resolved (the CPU and the large FSM cones
+now route 100 percent with 0 DRC, blocker 8). The remaining work is engineering at scale on these proven
+pieces: composing many cells reliably (the per-cell dispatch races still compound), folding the register
+-tile geometry into the emitter (blocker 7), the pure track-signal feedback, and speed. Not unknowns.
 
 ## 1. The physical OpenTTD NOR gate geometry. SOLVED for a single combinational gate AND a 2-gate chain.
 
@@ -350,38 +353,54 @@ its footprint into `place.REG_W`/`REG_H` and its pin offsets into `place._regist
 same swap-in-the-real-footprint move that closed the combinational NOR. The placement, routing, clock
 distribution, DRC and reconstruction are already done and verified in software.
 
-## 8. The channel router crowds risers at CPU scale (~1600 cells): DRC shorts. Logic is fine, routing is not DRC-clean at this size.
+## 8. RESOLVED. The CPU and the large raycaster cones now route 100 percent DRC-clean. (Was: "channel router crowds risers at ~1600 cells".)
 
 The minimal 8-bit accumulator CPU (`hdl/cpu.py`, the Fibonacci machine) is fully verified as LOGIC:
 the behavioural Amaranth `Cpu`, the structural gate + DFF `build_cpu_netlist`, its all-NOR
 `to_nor(keep_registers=True)` lowering, and the netlist RECONSTRUCTED from its placement all emit
 exactly the 13 eight-bit Fibonacci terms then the mod-256 overflow term, and the structural form steps
 cycle-for-cycle identically to the behavioural model across every exposed bit (ACC, PC, Z, phase,
-out_we, out_port) over many edges. See `hdl/test_cpu.py` (20 tests, all green).
+out_we, out_port) over many edges. See `hdl/test_cpu.py` (all green).
 
-What does NOT close: the lowered CPU (1631 cells: 1575 NOR + 54 register tiles + 2 const) PLACES and
-ROUTES to 100 percent of nets (1632/1632), with the clock reaching every one of the 54 register tiles,
-but `drc()` reports ~410 route shorts (mostly `route_short` "orientations V/X", plus one
-`pin_collision`). These are NOT a flaw in the CPU and NOT a logic error: they are a SCALE limit of the
-SHARED constructive channel router (`place_and_route/channel_route.py`), which this work was told to use
-as-is and not modify. The router gives each pin riser its own isolated column via `_assign_riser_columns`;
-at ~1600 cells with the CPU's dense fan-in/fan-out the clear-column supply runs out and the documented
-fallback ("take the nearest free column to the right ... surfaces honestly as a route_cuts_cell DRC
-violation, never a faked path") fires many times. Evidence it is scale, not the design: the 4-bit adder
-(92 cells) and the 8XY ALU (893 cells, combinational) both route DRC-clean through the same router; the
-sequential toggle/shift/3-bit-counter (<=37 cells) route DRC-clean too. The CPU is simply ~2x larger and
-denser than anything previously placed.
+NOW RESOLVED (the routing). The lowered CPU (1631 cells: 1575 NOR + 54 register tiles + 2 const) PLACES
+and ROUTES to 100 percent of nets (1632/1632), the clock reaches all 54 register tiles, and `drc()`
+returns 0 (was ~410). The large raycaster FSM cones route 0-DRC too: the ~1421-cell paint cone, the
+~1804-cell shade cone, and the ~3351-cell per-step cast cone (the largest, dominated by the 256-way map
+ROM) all place + channel-route 100 percent of nets with zero DRC. The adder (92) and ALU (893) stay
+clean, and reconstruction + sequential/cone equivalence still hold (the fixes change geometry, never
+logic). All 381 tests green.
 
-The fix is in the ROUTER contract, not in the CPU. Concrete next directions for the human, none built
-(all are router changes, deliberately out of scope here):
-  (a) widen the riser-column budget: `_widen_placement`'s per-channel spacing (SP=2, CHANNEL_SLACK=2)
-      is sized for the adder; give each channel more clear columns so dense columns never exhaust the
-      supply, at the cost of a wider map (cheap on OpenTTD).
-  (b) split the single clock SPINE into a few parallel trunk rows (a shallow H-tree) so the 54 clock
-      risers do not all crowd one band, and let other nets reuse the freed columns.
-  (c) a second routing pass that re-columns only the nets that took the fallback, since the failures are
-      localised (the bulk of nets route clean on the first pass).
-`hdl/test_cpu.py::test_cpu_places_routes_completely` asserts what genuinely holds at this scale
-(complete routing, 54 register tiles, clock reach) and documents this DRC item rather than asserting a
-clean result that the shared router cannot deliver. This is an honest negative on the BACKEND at scale,
-on top of a fully working CPU.
+The earlier diagnosis (riser crowding / clear-column exhaustion) was WRONG: instrumenting
+`_assign_riser_columns` showed every one of the CPU's 4025 pins got its own clean column, zero
+fallbacks. The ~410 shorts had THREE distinct wide-scale root causes, all now fixed:
+
+  (a) WIDE-FAN-IN FOOTPRINT (`place._cell_height`). The footprint was frozen at 3 rows tall for the
+      verified 1-2 input gates, but lowering at scale produces NORs up to ~10 inputs, whose input pins
+      stack down the west edge at rows LANE_DY..LANE_DY+n-1. Those pins spilled BELOW the 3-tall stamp
+      onto open ground, where foreign routes and the next stacked cell landed on them (a pin_collision
+      and the V/X shorts). Fix: `_cell_height` returns `max(CELL_H, LANE_DY + n)`, so the footprint
+      always contains every pin. Identical (h=3) for n<=2, so the in-game-proven small-gate stamp is
+      untouched.
+  (b) REPEATED INPUTS (`channel_route.route_nets`). Lowering emits NOR(a,a,a,a) (an input net repeated
+      on one cell); the placer gives each repeat its own west-edge tile on consecutive rows, all the
+      same net. Routing each repeat as its own stub+riser filled a 2D rectangle of tiles, classified
+      "X", which a foreign straight riser then crossed non-perpendicularly (the residual 148 V/X shorts
+      after fix (a)). Fix: the router COALESCES a run of stacked same-net pins into one vertical segment
+      on their shared pin column plus a single stub+riser, so the net's geometry near the cell is a
+      clean line, not a blob. Only consecutive same-column rows are joined, so pins that merely share a
+      placement column across different cells (ROW_GAP apart) still get their own risers, unchanged.
+  (c) OUTPUT-PAD CHANNEL (`channel_route.route_nets`). Output pads stack one-per-row in a single
+      right-edge column with no routing channel reserved west of them, so after a dozen pads the few
+      free west columns ran out and later pad risers fell EAST of the pad column, cutting their
+      neighbours (a route_cuts_pad + route_short, seen on the 20-output advance+frac cone). Fix: reserve
+      an output-pad channel (two columns per pad plus slack) between the logic and the pad column, the
+      mirror of the input-side left margin `_widen_placement` already reserves, so every pad riser lands
+      in clear space west of the pads.
+
+None of these touch the netlist or scenario CONTRACTS or the logic: same cells, same nets, same
+connectivity, same truth tables and cycle behaviour. They are pure placement/routing geometry. Cost is
+a modestly wider map (taller wide-fan-in footprints, plus the reserved output channel), cheap on
+OpenTTD. `hdl/test_cpu.py::test_cpu_places_routes_completely` and
+`hdl/test_raycaster_pipeline.py::test_larger_cone_routes_all_nets_drc_clean` now assert the clean
+result. (Earlier suggested router-level ideas, more riser columns / clock H-tree / second pass, were
+not needed: the failures were specific wide-fan-in and pad-column geometry, not a global crowding wall.)

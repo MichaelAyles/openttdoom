@@ -327,25 +327,30 @@ def test_register_bit_count_is_the_lean_state_budget():
 
 def test_cpu_places_routes_completely(cpu_placed):
     """The CPU places (one register tile per architectural bit), routes to 100 percent of nets,
-    and the clock reaches every register tile.
+    is DRC-clean, and the clock reaches every register tile.
 
-    KNOWN OPEN ITEM (the only thing that does not close): at ~1600 cells the SHARED constructive
-    channel router (place_and_route/channel_route.py, a pipeline contract this work must not
-    modify) crowds risers and produces bridge-crossing DRC shorts. That is a router-scale limit
-    that lives in the contract, not a flaw in the CPU: the 4-bit adder (92 cells) and the 8XY ALU
-    (893 cells) both route DRC-clean, and the CPU's LOGIC is fully verified above and below
-    (behavioural == structural == lowered == reconstructed, all emit Fibonacci). So this test
-    asserts what genuinely holds at this scale (complete routing, register tiles, clock reach) and
-    documents the DRC-at-scale item for STUCK.md rather than faking a clean result.
+    This used to be the documented backend-scale negative (STUCK.md #8): at ~1600 cells the
+    shared constructive channel router took its riser fallback and produced ~410 DRC route_shorts.
+    The cause turned out NOT to be riser crowding (no riser ever fell back) but two wide-fan-in
+    blind spots that only bite at this scale: a cell footprint that did not grow with fan-in (so a
+    wide NOR spilled its input pins below its 3-tall stamp) and the REPEATED-input case
+    (NOR(a,a,a,a)), whose stacked same-net pins were each routed as their own stub+riser, filling a
+    2D blob a foreign riser then crossed non-perpendicularly. Both are fixed (place._cell_height
+    grows to contain every pin; the router coalesces a run of stacked same-net pins into one pin
+    -column segment + one riser), so the CPU now routes 100 percent of nets with ZERO DRC, the same
+    as the 92-cell adder and the 893-cell ALU. The fix changes neither the netlist/scenario
+    contracts nor the logic (verified below: reconstructed-from-placement still emits Fibonacci).
     """
-    from check import unrouted_nets, overlap_violations
+    from check import unrouted_nets, overlap_violations, drc
     nl, low, scen, rr = cpu_placed
 
-    # placement legal (no two cells overlap) and routing complete.
+    # placement legal (no two cells overlap), routing complete, and DRC clean.
     assert overlap_violations(scen) == []
     assert unrouted_nets(scen) == [], f"unrouted: {unrouted_nets(scen)}"
     routed, total = rr.coverage()
     assert routed == total > 0, f"routed only {routed}/{total}"
+    d = drc(scen)
+    assert d == [], f"DRC: {[(v.kind, v.detail) for v in d][:10]}"
 
     # one register tile per architectural bit, the clock reaches every one of them.
     regs = [c for c in scen.cells if c.is_register()]

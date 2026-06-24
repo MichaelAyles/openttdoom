@@ -77,9 +77,10 @@ from scenario import PlacedCell, Pin
 # REAL computing-NOR stamp footprint (the verified block-signal NOR, see module docstring
 # and scenarios/computecell_gs). 14 wide: origin (west depot) .. east depot for the
 # 2-input case. 3 tall: feeder-depot row (cell.y), lane row (cell.y+1), one margin row.
-# The taps are laid horizontally along the single lane row, so unlike the old placeholder
-# the footprint does NOT need to grow with fan-in; the verified gate covers 1-2 taps (NOT
-# and NOR2), which is what the toolchain feeds it here.
+# This is the BASELINE for the verified 1-2 input gates (NOT, NOR2). Lowering at scale (the CPU
+# and the raycaster cones) produces WIDER NORs, up to ~10 inputs, whose input pins stack down the
+# west edge (see _input_pin_offsets), so _cell_height GROWS the footprint to contain every pin;
+# CELL_W/CELL_H stay the small-gate baseline (the in-game-proven stamp) and the column stride.
 CELL_W = 14
 CELL_H = 3
 
@@ -196,11 +197,24 @@ def logic_levels(netlist: Netlist) -> Dict[str, int]:
 def _cell_height(n_inputs: int) -> int:
     """Footprint height for a cell with n_inputs inputs.
 
-    The real stamp lays its taps along a single horizontal lane row, so the height is fixed
-    at CELL_H (feeder row, lane row, margin) and does not grow with fan-in. The verified gate
-    geometry covers 1-2 taps (NOT, NOR2); the toolchain feeds it cells in that range.
+    The input pins land on distinct WEST-edge rows LANE_DY .. LANE_DY+n-1 (see
+    _input_pin_offsets), so the footprint must be tall enough to CONTAIN every pin: a feeder
+    row above the lane, the n pin rows, and the routing/DRC must see the pins inside this
+    cell's own footprint. The last input pin sits at row LANE_DY + n - 1, so the footprint
+    spans rows 0 .. LANE_DY + n - 1, i.e. height LANE_DY + n.
+
+    For the verified 1-2 input gates (NOT, NOR2) this is exactly CELL_H == 3 (LANE_DY + 2 == 3),
+    so the proven in-game stamp geometry is unchanged; the height only GROWS for the wider NORs
+    that lowering produces at scale (the CPU / raycaster cones reach 8-10 inputs). Growing the
+    footprint to hold every pin is what keeps a wide-fan-in cell from spilling its input pins
+    onto open ground below its 3-tall stamp, which is the dense-design DRC short the shared
+    channel router was wrongly blamed for: with the pins inside the footprint, no foreign route
+    or stacked cell can land on them, and no two cells' pins collide. We never let the footprint
+    shrink below CELL_H, so the small gates are byte-for-byte identical to before.
     """
-    return CELL_H
+    if n_inputs <= 0:
+        return CELL_H
+    return max(CELL_H, LANE_DY + n_inputs)
 
 
 def _cell_width(n_inputs: int) -> int:
