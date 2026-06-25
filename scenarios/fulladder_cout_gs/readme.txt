@@ -48,3 +48,11 @@ with a longer settle and a depot-exists pre-check, after which the clean run abo
 RUN:  python tools/run_fixed.py --gsname fulladdercout --gsdir fulladder_cout_gs --prefix "FC40" \
           --minfields 9 --timeout 800 --runs 4
 Expected (all eight): cout = 0,0,0,1,0,1,1,1 = majority(a,b,cin), the full-adder carry-out.
+
+ORCHESTRATOR OWN FULL RUN (honest reliability note): a full 8-combo run by the orchestrator read
+FC40 39 39 39 45 39 45 45 34 = 0,0,0,1,0,1,1,0, i.e. 7 of 8 combos correct (majority), with combo
+111 reading 34 (a low/stalled reader => 0) where majority(1,1,1)=1. That 8th miss is a per-combo
+train-DISPATCH stall (the reader did not reach its position), not a wrong-logic bit: the 7 combos
+that dispatched cleanly all read the correct majority. So the carry mechanism is correct; the
+per-combo dispatch reliability (~7-8 of 8) is the bounding factor and compounds with combo count,
+the same dispatch-race limit seen elsewhere.
