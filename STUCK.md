@@ -522,3 +522,23 @@ the two-stacked-XOR chain MECHANISM is proven; the remaining blockers are bridge
 mid-run" was SELF-INFLICTED by overlapping test processes, a leftover run_fixed zombie's per-run "taskkill
 openttd" kills the live run's server, masquerading as a GS restart. NEVER run more than one run_fixed /
 openttd at a time; hard-kill all stray python + openttd before each run.
+
+UPDATE 5 (the COMPLETE 1-bit full adder: architecture proven, but it does NOT close 8/8 in one run, the
+bound is the dispatch race). scenarios/fulladder_gs/ builds a complete 1-bit full adder on trains: SUM =
+parity(a,b,cin) as the two-stacked bridged-XOR (fasum design), CARRY = majority(a,b,cin) as the depth-1
+fulladder_cout network, both read from RAW reader x per combo, all gates real NOR, all reconvergent
+crossings real GSBridge bridges (IsBridgeTile-verified). The MECHANISM is honest and audited: no parity/
+majority/addition in Squirrel, outputs only from raw reader positions, and PER CORRECT COMBO the chain
+genuinely computes a physical full adder. BUT it does NOT close all 8 combos in a single run. An
+independent sole-process verify run (~46 min) read b0 (a bridge failed the strict both-ends check), SUM
+6/8 of dispatched combos (combo 010 wrong, 111 a dispatch miss), CARRY with 2 GENUINE wrong-logic reads
+(cout=1 where majority=0 on 001 and 100, the co-located carry reads less cleanly than standalone) plus 2
+dispatch misses, and only 3 of 8 combos correct on BOTH outputs. Committed fasum runs are 7/8 each with the
+failing combo differing run to run, union 8/8 but never a clean single run. So: a full adder COMPUTES per
+correct combo and the whole architecture (fixed networks + bridges = arbitrary logic) is proven, but a
+reliable single-run 8/8 full adder is bounded by the PER-COMBO DISPATCH RACE: readers/inputs intermittently
+fail to leave their depots (raw x = -1), and inputs caught mid-motion do not park. Retry-tuning softens it,
+the real fix is DETERMINISTIC PLACEMENT (input trains resting on a holding signal, readers gated to launch
+deterministically) - the same fix flagged for SC2, not built. Plus 48-bridge build reliability (b0 vs b1)
+and ~46 min/run speed. This is the recurring central reliability wall, now at full-adder scale, with the
+architecture above it fully proven.
