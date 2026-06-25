@@ -542,3 +542,67 @@ the real fix is DETERMINISTIC PLACEMENT (input trains resting on a holding signa
 deterministically) - the same fix flagged for SC2, not built. Plus 48-bridge build reliability (b0 vs b1)
 and ~46 min/run speed. This is the recurring central reliability wall, now at full-adder scale, with the
 architecture above it fully proven.
+
+UPDATE 6 (the DISPATCH RACE is FIXED deterministically; the per-combo miss rate went from common to NIL,
+proven on the bridged XOR; the full adder's remaining limiters are the SEPARATE bridge-build and a map-10
+build-hang, both now addressed). The "real fix" flagged in UPDATE 5 was BUILT. Two mechanism-level changes,
+reusing the proven clock-launch egress hardening (scenarios/clockgate_gs/main_clocked.nut NudgeEgress), now
+in BOTH scenarios/xorsum1_gs/main.nut and scenarios/fulladder_gs/main.nut:
+  STAGE 1 (reader/input egress): BuildReader and ParkInput drive egress with NudgeEgress, which fires
+    EXACTLY ONE StartStopVehicle per settle and verifies the train LEFT its depot tile before returning.
+    The old tight poll re-fired the ASYNC (queued) StartStop while a prior toggle was still in flight,
+    double-toggling the train back to a stop (~1 in 3 fresh egresses stuck = the raw x = -1 miss). A reader
+    that will not leave is scrapped and rebuilt. So no reader returns -1 from a stuck depot egress.
+  STAGE 2 (deterministic input placement): ParkInput CONFIRMS the input came to rest inside its gate's
+    protected block [sig..sigt] BY CONSTRUCTION (rebuild on a stuck egress or an overshoot past sigt), and
+    the reader is dispatched only after every input is confirmed parked - never caught mid-motion. The
+    block-signal read needs only presence in [sig..sigt], so resting in-block is exactly correct.
+PROVEN on the bridged XOR (xorsum1, 4 combos), the BEFORE/AFTER from RAW g4 reader x (x = -1 == a MISS):
+  BEFORE (unhardened, 3 fresh runs x 4 combos): one run read "XS1 s44 -1 -1 -1 -1" = ALL FOUR g4 readers
+    missed (plus the g3 readers -1); >= 4/12 g4 misses plus a whole-run all-(-1) COLLAPSE.
+  AFTER (hardened, 3 fresh runs x 4 combos): ZERO x = -1 across EVERY readout. run1/run2 = "XS1 s44 43 56
+    56 43 b1" = 0,1,1,0 = XOR clean; run3 = "XS1 s44 43 56 56 56 b0" = 0,1,1,1 with ZERO dispatch misses
+    but b0 (a BRIDGE failed to build - the SEPARATE bridge axis - broke the g3->g4 coupling so c11 read 1).
+  So the dispatch race went from COMMON (a whole-run collapse) to NIL (0 misses in 12 dispatches). The one
+  wrong AFTER output is the independent bridge-build flake, unchanged by this fix. HONEST COST: the
+  deterministic ParkInput trades speed for certainty (the heavy a=1,b=1 combo's confirm-and-rebuild takes a
+  few minutes), so it needs a generous timeout.
+For the FULL ADDER (fulladder_gs, 8 combos, map 10) the SAME hardening applies to all 8 combos. A SECOND,
+environment-level blocker surfaced and was fixed: the map-10 Prepare did a SINGLE GSTile.LevelTiles over the
+~42x525 = 22000-tile rectangle, which HANGS the dedicated server's tick loop (openttd CPU froze at
+UserModeTime=625000 for >60s at "FA build" before any progress, reproduced TWICE via a CPU-time watchdog).
+Fix: Prepare now demolishes+levels in 24-row STRIPS, each a bounded command with a yield, and emits "FA
+prepNN" / "FA bldN/8" progress markers so a slow build is visibly distinct from a hang. With the chunking the
+build advances and COMPLETES (prep 0->100 then bld 1/8->8/8 then "FA built8"). The remaining single-run-8/8
+bound is the SEPARATE 48-bridge build reliability (b0 vs b1) plus speed, NOT the dispatch race, which is now
+deterministic. See scenarios/xorsum1_gs/readme.txt (the BEFORE/AFTER) and scenarios/fulladder_gs/readme.txt.
+
+HARDENED FULL-ADDER RUN (hardened_run3.log, honest outcome). The chunked-Prepare fix WORKED: the map-10
+build completed with no hang, read b0 (the separate bridge axis failed at least one of 48 bridges). The
+first SIX combos (c000..c100) ALL dispatched with ZERO dispatch misses (no x=-1 anywhere), the CARRY (no
+bridges) read correctly on all six, and the SUM read correctly on the 3 cin=0 combos (000,010,100 all BOTH
+-outputs correct) and wrong ONLY on the 2 cin=1 combos (001,011), that error being exclusively the b0
+bridge break, NOT a dispatch miss. So the DISPATCH-RACE FIX held perfectly across all 6 dispatched combos.
+HONEST CEILING: the run did NOT reach all 8 because c101's deterministic ParkInput on the heaviest input
+load (a=1,cin=1) HUNG the dedicated-server tick loop (openttd CPU froze, confirmed via watchdog, run
+killed); c110/c111 not reached. So the cleanest hardened full-adder run is 6/8 combos dispatched (6/6 clean,
+zero -1), 3/6 fully correct on both outputs (all cin=0), the SUM errors all the b0 bridge. The remaining
+open items are the 48-bridge build reliability (b0) and a heavy-combo ParkInput tick-loop hang/speed, both
+SEPARATE from the now-deterministic dispatch.
+
+UPDATE 6 (deterministic DISPATCH fixed the x=-1 MISSES, but a separate reconvergent-READ logic axis
+remains). Applying the proven clock-launch egress hardening (NudgeEgress, one StartStopVehicle per settle,
+movement-verified) to the per-combo READERS + deterministic input placement (ParkInput confirms each input
+RESTS inside its gate's protected block by construction, not caught mid-motion) ELIMINATED the dispatch
+race: the x=-1 misses (readers/inputs not leaving depots, whole-run all-(-1) collapses) went from common to
+NIL. Orchestrator-confirmed on the bridged XOR (xorsum1): 5 fresh sole-process runs, all b1, ZERO x=-1
+across 20 dispatches. THAT axis is genuinely fixed. BUT a SEPARATE logic-reliability axis remains, which the
+fix exposed and the build agent's "2/3 clean" overstated: the bridged XOR reads the WRONG value ~half the
+time even with clean dispatch and all bridges built. Orchestrator's 5 runs: 2 clean 0,1,1,0; 3 with a wrong
+combo (c00 read x=50/56 where it should be ~43, or c01 read ~43 where it should pass) = 2/5 logic-clean. The
+flake is always c00/c01 (the reconvergent gate g3/g4): the reader stops a few tiles off the coupling tile,
+so the reconvergent FREEZE is not tight enough through the bridged coupling. c10/c11 are always right. So
+the central reliability wall has TWO axes: DISPATCH MISSES (now fixed) and RECONVERGENT-READ LOGIC (~50%,
+the g3/g4 freeze precision through the bridge), plus the 48-bridge build (b0) and the heavy-combo hang. The
+dispatch fix is real and banked; the reconvergent-freeze precision is the next target. Build-hang fix:
+chunked Prepare into 24-row yielded strips (a single 22000-tile LevelTiles froze the map-10 tick loop).

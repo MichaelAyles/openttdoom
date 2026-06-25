@@ -56,6 +56,49 @@ Readouts via the company name (two short lines streamed in turn): "FA50 <8 sum x
 "FC40 <8 cout x>", plus per-combo "c<abc> s<x> m<x>". Judge externally: sum x > 50 => 1 (parity),
 cout x > 40 => 1 (majority). Map 10 (1024) because the combined band is 62 rows tall x 8 combos.
 
+DISPATCH HARDENING (applied, the deterministic-dispatch fix)
+------------------------------------------------------------
+The per-combo READER and INPUT dispatch (the documented "raw x = -1" / "input not parking" race)
+was hardened with the SAME mechanism proven on the clock launch (main_clocked.nut NudgeEgress) and
+verified on xorsum1 (see scenarios/xorsum1_gs/readme.txt for the BEFORE/AFTER):
+  - BuildReader / RunFreeze / RunFreezeFar / RunReader: egress driven by NudgeEgress (one
+    StartStopVehicle per settle, movement-verified), scrap-and-rebuild on a stuck reader, so no
+    reader returns x = -1 from never leaving its depot.
+  - ParkInput: confirms each input RESTS inside its gate's protected block [sig..sigt] by
+    construction (rebuild on a stuck egress or an overshoot), and the reader runs only after every
+    input is confirmed parked, so an input is never caught mid-motion.
+On xorsum1 (4 combos) this took the per-combo dispatch miss rate from common (a whole-run
+all-(-1) collapse) to ZERO across 3 fresh runs. For the full adder the SAME hardening applies to
+all 8 combos x (12 SUM + 4 CARRY) lanes; the remaining single-run bound is the SEPARATE 48-bridge
+build axis (b0 vs b1), not the dispatch race.
+
+ALSO FIXED for the full adder: a map-10 BUILD HANG. The old Prepare did a SINGLE GSTile.LevelTiles over
+the ~42x525 = 22000-tile full-adder rectangle, which FREEZES the dedicated server's tick loop (openttd
+CPU froze at "FA build" before any progress, reproduced twice via a CPU-time watchdog). Prepare now
+demolishes+levels in 24-row STRIPS, each a bounded command + a yield, and emits "FA prepNN"/"FA bldN/8"
+progress markers. With the chunking the build advances cleanly to completion (see hardened_run3.log:
+prep 0->100 then bld 1/8->8/8 then "FA built8").
+
+HARDENED-RUN RESULT (hardened_run3.log, one fresh sole-process run, the deterministic-dispatch + chunked
+-build version; judged from RAW reader x, sum x>50 => 1, cout x>40 => 1). The build completed (no hang),
+read b0 (the SEPARATE bridge axis: at least one of the 48 bridges failed). The first SIX combos all
+dispatched with ZERO dispatch misses (NO x = -1 anywhere), then combo c101's deterministic ParkInput on
+the heaviest input load (a=1,cin=1) HUNG the tick loop (CPU frozen, run killed); c110/c111 not reached.
+Per-combo (every reader dispatched, judged from raw x):
+  c000 s49 m39 = sum 0, cout 0   BOTH CORRECT  (full-adder(0,0,0))
+  c001 s49 m39 = sum 0, cout 0   cout correct; sum wrong = the b0 bridge broke the cin coupling
+  c010 s60 m39 = sum 1, cout 0   BOTH CORRECT  (full-adder(0,1,0))
+  c011 s60 m48 = sum 1, cout 1   cout correct; sum wrong = b0
+  c100 s60 m39 = sum 1, cout 0   BOTH CORRECT  (full-adder(1,0,0))
+So 6 of 8 combos DISPATCHED, ALL SIX with zero dispatch misses (the dispatch-race fix held perfectly);
+the CARRY (no bridges) was correct on ALL 6 dispatched combos; the SUM was correct on the 3 cin=0 combos
+and wrong ONLY on the 2 cin=1 combos, and that error is exclusively the b0 BRIDGE break (the separate
+axis), NOT a dispatch miss. THREE combos read BOTH outputs correct (000, 010, 100, all cin=0). HONEST:
+the run did not reach all 8 because the deterministic ParkInput on the heaviest combo (c101) hit a
+tick-loop hang on the b0-corrupted band; the dispatch RELIABILITY result (zero x=-1 across 6 combos +
+all 3 xorsum1 runs) stands, the open items are the 48-bridge build reliability (b0) and the heavy-combo
+ParkInput hang/speed.
+
 HONEST CEILING (orchestrator, authoritative). This full adder does NOT close all 8 combos in a single run.
 An independent sole-process verify run (~46 min) read b0 (a bridge failed), SUM 6/8 of dispatched combos
 (010 wrong, 111 a dispatch miss), CARRY with 2 GENUINE wrong-logic reads (001, 100) plus 2 dispatch misses,

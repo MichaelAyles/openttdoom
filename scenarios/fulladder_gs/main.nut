@@ -64,15 +64,27 @@ function FullAdderMain::PickEngine(rt) {
 function FullAdderMain::Tx(v) { if (v==null||!GSVehicle.IsValidVehicle(v)) return -1; return GSMap.GetTileX(GSVehicle.GetLocation(v)); }
 function FullAdderMain::Ty(v) { if (v==null||!GSVehicle.IsValidVehicle(v)) return -1; return GSMap.GetTileY(GSVehicle.GetLocation(v)); }
 function FullAdderMain::Say(s) { GSCompany.SetName(s); }
-function FullAdderMain::Prepare(x0, y0, x1, y1) {
-    for (local x = x0; x <= x1; x++) {
-        for (local y = y0; y <= y1; y++)
-            GSTile.DemolishTile(GSMap.GetTileIndex(x, y));
+// Prepare a flat strip [x0..x1] x [y0..y1]. CHUNKED + yielded: a single LevelTiles over the full
+// ~42x525 = 22000-tile full-adder rectangle hangs the dedicated server's tick loop (CPU freezes at
+// "FA build" before any progress, reproduced twice on map 10). Here the rectangle is demolished and
+// LEVELLED in horizontal strips of <= STRIP rows, each its own bounded command with a yield, so no
+// single command is enormous and the engine keeps ticking. Progress is reported via `tag` so a slow
+// build is visibly distinct from a hang.
+function FullAdderMain::Prepare(x0, y0, x1, y1, tag) {
+    local STRIP = 24;
+    for (local sy = y0; sy <= y1; sy += STRIP) {
+        local ey = sy + STRIP - 1; if (ey > y1) ey = y1;
+        for (local x = x0; x <= x1; x++) {
+            for (local y = sy; y <= ey; y++)
+                GSTile.DemolishTile(GSMap.GetTileIndex(x, y));
+            GSController.Sleep(1);
+        }
+        GSTile.LevelTiles(GSMap.GetTileIndex(x0, sy), GSMap.GetTileIndex(x1, ey));
+        GSController.Sleep(2);
+        GSTile.LevelTiles(GSMap.GetTileIndex(x0, sy), GSMap.GetTileIndex(x1, ey));
         GSController.Sleep(1);
+        if (tag != null) this.Say(tag + " prep" + ((ey - y0) * 100 / (y1 - y0)));
     }
-    GSTile.LevelTiles(GSMap.GetTileIndex(x0, y0), GSMap.GetTileIndex(x1, y1));
-    GSController.Sleep(2);
-    GSTile.LevelTiles(GSMap.GetTileIndex(x0, y0), GSMap.GetTileIndex(x1, y1));
 }
 function FullAdderMain::SignalVerified(sx, gy) {
     local t = GSMap.GetTileIndex(sx, gy);
@@ -161,44 +173,92 @@ function FullAdderMain::BuildBridgedSpur(cplx, gya, gyb, lys) {
     foreach (ly in lys) ok = this.BuildOneBridge(cplx, ly) && ok;
     return ok;
 }
-function FullAdderMain::ParkInput(d, tx, gy) {
-    local v = null;
-    for (local b = 0; b < 14; b++) {
-        v = GSVehicle.BuildVehicle(d, this.eng);
-        if (GSVehicle.IsValidVehicle(v)) break;
-        GSController.Sleep(5);
+// ---- SHARED EGRESS HARDENING (the proven main_clocked.nut NudgeEgress pattern, see xorsum1) ----
+// Fire EXACTLY ONE start toggle per SETTLE (StartStopVehicle is async/queued; a tight re-poll
+// double-toggles and re-stops the train, the documented raw x = -1 / wrongly-absent-input flake).
+// One-shot, settle-verified egress for a vehicle whose depot tile is (dx,dy).
+function FullAdderMain::NudgeEgress(v, dx, dy) {
+    for (local r = 0; r < 40; r++) {
+        if (!GSVehicle.IsValidVehicle(v)) return false;
+        local cx = this.Tx(v); local cy = this.Ty(v);
+        if (cx >= 0 && !(cx == dx && cy == dy) && !GSVehicle.IsStoppedInDepot(v)) return true;
+        if (GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
+        GSController.Sleep(10);
     }
-    if (!GSVehicle.IsValidVehicle(v)) return null;
-    GSOrder.AppendOrder(v, GSMap.GetTileIndex(tx, gy), GSOrder.OF_NON_STOP_INTERMEDIATE);
-    if (GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
-    for (local w = 0; w < 40; w++) {
-        GSController.Sleep(5);
-        if (GSVehicle.IsValidVehicle(v) && GSMap.GetTileX(GSVehicle.GetLocation(v))==tx && GSMap.GetTileY(GSVehicle.GetLocation(v))==gy) { GSVehicle.StartStopVehicle(v); break; }
-    }
-    return v;
+    return (GSVehicle.IsValidVehicle(v) && !GSVehicle.IsStoppedInDepot(v));
 }
-function FullAdderMain::BuildReader(wd, ed) {
+// Dispose a stray input/reader (see xorsum1::Scrap): home to depot d then sell; never sell mid-track.
+function FullAdderMain::Scrap(v, d) {
+    if (v == null || !GSVehicle.IsValidVehicle(v)) return;
+    if (GSVehicle.IsStoppedInDepot(v)) { GSVehicle.SellVehicle(v); return; }
+    while (GSOrder.GetOrderCount(v) > 0) { if (!GSOrder.RemoveOrder(v, 0)) break; }
+    GSOrder.AppendOrder(v, d, GSOrder.OF_NON_STOP_INTERMEDIATE);
+    if (GSVehicle.IsValidVehicle(v) && GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
+    for (local s = 0; s < 40; s++) {
+        if (!GSVehicle.IsValidVehicle(v) || GSVehicle.IsStoppedInDepot(v)) break;
+        GSController.Sleep(6);
+    }
+    if (GSVehicle.IsValidVehicle(v) && GSVehicle.IsStoppedInDepot(v)) GSVehicle.SellVehicle(v);
+}
+// STAGE 2 deterministic input placement (see xorsum1::ParkInput): the input RESTS inside its gate's
+// protected block [sigx..sigtx] by construction, confirmed before the reader runs; confirm-and
+// -rebuild on a stuck egress or an overshoot. The feeder depot d sits at (dx,dy)=(tx,gy-1).
+function FullAdderMain::ParkInput(d, tx, gy, dx, dy, sigx, sigtx) {
+    for (local attempt = 0; attempt < 4; attempt++) {
+        local v = null;
+        for (local b = 0; b < 20; b++) {
+            v = GSVehicle.BuildVehicle(d, this.eng);
+            if (GSVehicle.IsValidVehicle(v)) break;
+            GSController.Sleep(6);
+        }
+        if (!GSVehicle.IsValidVehicle(v)) { GSController.Sleep(8); continue; }
+        GSOrder.AppendOrder(v, GSMap.GetTileIndex(tx, gy), GSOrder.OF_NON_STOP_INTERMEDIATE);
+        if (!this.NudgeEgress(v, dx, dy)) { this.Scrap(v, d); continue; }
+        local parked = false;
+        for (local w = 0; w < 60; w++) {
+            GSController.Sleep(3);
+            if (!GSVehicle.IsValidVehicle(v)) break;
+            local cx = this.Tx(v); local cy = this.Ty(v);
+            if (cy == gy && cx >= tx && cx <= sigtx) { GSVehicle.StartStopVehicle(v); parked = true; break; }
+            if (cy == gy && cx > sigtx) break;
+        }
+        if (!parked) { this.Scrap(v, d); continue; }
+        for (local s = 0; s < 16; s++) {
+            GSController.Sleep(4);
+            if (!GSVehicle.IsValidVehicle(v)) break;
+            if (GSVehicle.GetCurrentSpeed(v) == 0) break;
+        }
+        if (GSVehicle.IsValidVehicle(v)) {
+            local cx = this.Tx(v); local cy = this.Ty(v);
+            if (cy == gy && cx >= sigx && cx <= sigtx) return v;
+        }
+        this.Scrap(v, d);
+    }
+    return null;
+}
+// Build a reader and CONFIRM it left its west depot (STAGE 1 egress hardening). (dx,dy) is the west
+// depot tile; scrap-and-rebuild on a stuck egress. Fixes the raw x = -1 misses (stuck readers).
+function FullAdderMain::BuildReader(wd, ed, dx, dy) {
     if (!GSRail.IsRailDepotTile(wd))
         for (local d = 0; d < 10 && !GSRail.IsRailDepotTile(wd); d++) GSController.Sleep(5);
-    local v = null;
-    for (local b = 0; b < 40; b++) {
-        v = GSVehicle.BuildVehicle(wd, this.eng);
-        if (GSVehicle.IsValidVehicle(v)) break;
+    for (local attempt = 0; attempt < 4; attempt++) {
+        local v = null;
+        for (local b = 0; b < 40; b++) {
+            v = GSVehicle.BuildVehicle(wd, this.eng);
+            if (GSVehicle.IsValidVehicle(v)) break;
+            GSController.Sleep(8);
+        }
+        if (!GSVehicle.IsValidVehicle(v)) { GSController.Sleep(8); continue; }
+        GSOrder.AppendOrder(v, ed, GSOrder.OF_NON_STOP_INTERMEDIATE);
+        if (this.NudgeEgress(v, dx, dy)) return v;
+        if (GSVehicle.IsValidVehicle(v) && GSVehicle.IsStoppedInDepot(v)) GSVehicle.SellVehicle(v);
         GSController.Sleep(8);
     }
-    if (!GSVehicle.IsValidVehicle(v)) return null;
-    GSOrder.AppendOrder(v, ed, GSOrder.OF_NON_STOP_INTERMEDIATE);
-    return v;
+    return null;
 }
 function FullAdderMain::RunFreeze(wd, ed, gy, sigx, cpl) {
-    local v = this.BuildReader(wd, ed);
+    local v = this.BuildReader(wd, ed, GSMap.GetTileX(wd), GSMap.GetTileY(wd));
     if (v == null) return -1;
-    GSController.Sleep(5);
-    for (local r = 0; r < 10; r++) {
-        if (GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
-        GSController.Sleep(4);
-        if (!GSVehicle.IsStoppedInDepot(v)) break;
-    }
     local fx = -1;
     for (local s = 0; s < 200; s++) {
         GSController.Sleep(3);
@@ -213,15 +273,8 @@ function FullAdderMain::RunFreeze(wd, ed, gy, sigx, cpl) {
 }
 // Patient far-freeze (for the cout r3 root whose coupling column is east of an intervening lane).
 function FullAdderMain::RunFreezeFar(wd, ed, gy, sigx, cpl) {
-    local v = this.BuildReader(wd, ed);
+    local v = this.BuildReader(wd, ed, GSMap.GetTileX(wd), GSMap.GetTileY(wd));
     if (v == null) return -1;
-    GSController.Sleep(5);
-    for (local r = 0; r < 14; r++) {
-        if (!GSVehicle.IsValidVehicle(v)) break;
-        if (GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
-        GSController.Sleep(4);
-        if (!GSVehicle.IsStoppedInDepot(v)) break;
-    }
     local fx = -1;
     for (local s = 0; s < 420; s++) {
         GSController.Sleep(3);
@@ -236,14 +289,8 @@ function FullAdderMain::RunFreezeFar(wd, ed, gy, sigx, cpl) {
     return fx;
 }
 function FullAdderMain::RunReader(wd, ed) {
-    local v = this.BuildReader(wd, ed);
+    local v = this.BuildReader(wd, ed, GSMap.GetTileX(wd), GSMap.GetTileY(wd));
     if (v == null) return -1;
-    GSController.Sleep(5);
-    for (local r = 0; r < 10; r++) {
-        if (GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
-        GSController.Sleep(4);
-        if (!GSVehicle.IsStoppedInDepot(v)) break;
-    }
     local fx = -1;
     for (local s = 0; s < 24; s++) { GSController.Sleep(12); local t = this.Tx(v); if (t >= 0) fx = t; }
     return fx;
@@ -312,15 +359,16 @@ function FullAdderMain::BuildCopy(gy) {
 
 // Run one combo (a,b,cin): run the SUM network -> s, then the CARRY network -> cout.
 function FullAdderMain::RunCase(c, a, b, cin) {
-    // SUM primaries
-    if (a) this.ParkInput(c.fa.aa, A_TA, c.ya);
-    if (b) this.ParkInput(c.fa.ab, A_TB, c.ya);
-    if (a) this.ParkInput(c.fa.ea, E_TA, c.ye);
-    if (b) this.ParkInput(c.fa.eb, E_TB, c.ye);
-    if (a) this.ParkInput(c.fa.b1a, B_TA, c.yb);
-    if (b) this.ParkInput(c.fa.d2b, D_TB, c.yd);
-    if (cin) this.ParkInput(c.fc.nc, NC_TCIN, c.ync);
-    if (cin) this.ParkInput(c.fc.p, P_TCIN, c.yp);
+    // SUM primaries (each parks deterministically inside its OWN gate's protected block [sig..sigt];
+    // feeder depot one tile NORTH of the tap).
+    if (a) this.ParkInput(c.fa.aa, A_TA, c.ya, A_TA, c.ya - 1, A_SIG, A_SIGT);
+    if (b) this.ParkInput(c.fa.ab, A_TB, c.ya, A_TB, c.ya - 1, A_SIG, A_SIGT);
+    if (a) this.ParkInput(c.fa.ea, E_TA, c.ye, E_TA, c.ye - 1, E_SIG, E_SIGT);
+    if (b) this.ParkInput(c.fa.eb, E_TB, c.ye, E_TB, c.ye - 1, E_SIG, E_SIGT);
+    if (a) this.ParkInput(c.fa.b1a, B_TA, c.yb, B_TA, c.yb - 1, B_SIG, B_SIGT);
+    if (b) this.ParkInput(c.fa.d2b, D_TB, c.yd, D_TB, c.yd - 1, D_SIG, D_SIGT);
+    if (cin) this.ParkInput(c.fc.nc, NC_TCIN, c.ync, NC_TCIN, c.ync - 1, NC_SIG, NC_SIGT);
+    if (cin) this.ParkInput(c.fc.p, P_TCIN, c.yp, P_TCIN, c.yp - 1, P_SIG, P_SIGT);
     GSController.Sleep(8);
     // SUM XOR1 -> freeze g4 = h
     this.RunFreeze(c.la.wd, c.la.ed, c.ya, A_SIG, A_CPL);  GSController.Sleep(6);
@@ -339,13 +387,13 @@ function FullAdderMain::RunCase(c, a, b, cin) {
     this.RunFreeze(c.lq.wd, c.lq.ed, c.yq, Q_SIG, Q_CPL);  GSController.Sleep(40);
     local s = this.RunReader(c.lyy.wd, c.lyy.ed);
 
-    // CARRY primaries (each its OWN parked trains)
-    if (a)   this.ParkInput(c.fm.r1a, R1_TA, c.y1);
-    if (b)   this.ParkInput(c.fm.r1b, R1_TB, c.y1);
-    if (a)   this.ParkInput(c.fm.r2a, R2_TA, c.y2);
-    if (cin) this.ParkInput(c.fm.r2c, R2_TC, c.y2);
-    if (b)   this.ParkInput(c.fm.r3b, R3_TB, c.y3);
-    if (cin) this.ParkInput(c.fm.r3c, R3_TC, c.y3);
+    // CARRY primaries (each its OWN parked trains, deterministic placement in [sig..sigt]).
+    if (a)   this.ParkInput(c.fm.r1a, R1_TA, c.y1, R1_TA, c.y1 - 1, R1_SIG, R1_SIGT);
+    if (b)   this.ParkInput(c.fm.r1b, R1_TB, c.y1, R1_TB, c.y1 - 1, R1_SIG, R1_SIGT);
+    if (a)   this.ParkInput(c.fm.r2a, R2_TA, c.y2, R2_TA, c.y2 - 1, R2_SIG, R2_SIGT);
+    if (cin) this.ParkInput(c.fm.r2c, R2_TC, c.y2, R2_TC, c.y2 - 1, R2_SIG, R2_SIGT);
+    if (b)   this.ParkInput(c.fm.r3b, R3_TB, c.y3, R3_TB, c.y3 - 1, R3_SIG, R3_SIGT);
+    if (cin) this.ParkInput(c.fm.r3c, R3_TC, c.y3, R3_TC, c.y3 - 1, R3_SIG, R3_SIGT);
     GSController.Sleep(8);
     this.RunFreeze(c.l1.wd, c.l1.ed, c.y1, R1_SIG, R1_CPL);  GSController.Sleep(6);
     this.RunFreeze(c.l2.wd, c.l2.ed, c.y2, R2_SIG, R2_CPL);  GSController.Sleep(6);
@@ -365,12 +413,21 @@ function FullAdderMain::Start() {
     local rt = GSRailTypeList().Begin();
     GSRail.SetCurrentRailType(rt);
     this.eng = this.PickEngine(rt);
+    // WORLD-READY SETTLE (the clockgate fix): on a freshly launched map-10 dedicated server the first
+    // build commands can fire before the economy/map are ready. Wait for a valid buildable engine,
+    // then settle, before the heavy Prepare.
+    for (local w = 0; w < 40 && this.eng == null; w++) { GSController.Sleep(10); this.eng = this.PickEngine(rt); }
+    GSController.Sleep(20);
 
     local lastY = BASE + 7*BAND + DY_R3;
-    this.Prepare(A_BX - 2, BASE - 2, Y_EAST + 2, lastY + 2);
+    this.Prepare(A_BX - 2, BASE - 2, Y_EAST + 2, lastY + 2, "FA");
 
     local copies = [];
-    for (local k = 0; k < 8; k++) { copies.append(this.BuildCopy(BASE + k*BAND)); GSController.Sleep(4); }
+    for (local k = 0; k < 8; k++) {
+        copies.append(this.BuildCopy(BASE + k*BAND));
+        this.Say("FA bld" + (k + 1) + "/8");   // per-copy progress: a slow build stays visible, a hang does not advance
+        GSController.Sleep(4);
+    }
     this.Say("FA built8 b" + (this.allbr ? 1 : 0));
 
     local combos = [[0,0,0],[0,0,1],[0,1,0],[0,1,1],[1,0,0],[1,0,1],[1,1,0],[1,1,1]];

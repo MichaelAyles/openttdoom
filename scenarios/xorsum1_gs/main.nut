@@ -184,52 +184,135 @@ function XorSum1Main::BuildOneBridge(cplx, ly) {
     return GSBridge.IsBridgeTile(head);
 }
 
-// Park an input train on tile (tx,gy) from feeder depot d. Freeze it on the tap. BuildVehicle is
-// retried until valid (a failed build would leave that input wrongly absent and corrupt the combo).
-function XorSum1Main::ParkInput(d, tx, gy) {
-    local v = null;
-    for (local b = 0; b < 14; b++) {
-        v = GSVehicle.BuildVehicle(d, this.eng);
-        if (GSVehicle.IsValidVehicle(v)) break;
-        GSController.Sleep(5);
+// ---- SHARED EGRESS HARDENING (the proven main_clocked.nut NudgeEgress pattern) ----
+//
+// THE DIAGNOSED FLAW (reused from the clock launch). Egress used a tight poll
+//     if (IsStoppedInDepot) StartStopVehicle; Sleep(small); if (!IsStoppedInDepot) break;
+// StartStopVehicle TOGGLES the stopped flag and is an ASYNCHRONOUS (queued) command: after it
+// fires the train stays IsStoppedInDepot==true for several ticks until the command lands and the
+// train physically clears the depot tile. A tight re-poll re-reads true and fires a SECOND toggle,
+// which RE-STOPS the train once both land. Under server load this oscillates and ~1 in 3 fresh
+// dispatches the train never leaves the depot inside the budget (the raw x = -1 miss for readers,
+// the wrongly-absent input for inputs). FIX: fire EXACTLY ONE start toggle per SETTLE, and verify
+// movement (the train tile is no longer the depot tile) before declaring egress.
+//
+// One-shot, settle-verified depot egress for a vehicle whose depot tile is (dx,dy). Fires at most
+// one start toggle per settle; returns true once the train has left the depot tile.
+function XorSum1Main::NudgeEgress(v, dx, dy) {
+    for (local r = 0; r < 40; r++) {
+        if (!GSVehicle.IsValidVehicle(v)) return false;
+        local cx = this.Tx(v); local cy = this.Ty(v);
+        if (cx >= 0 && !(cx == dx && cy == dy) && !GSVehicle.IsStoppedInDepot(v)) return true;
+        // fire a fresh toggle ONLY when CONFIRMED still stopped in the depot (a dropped command);
+        // a started-but-not-yet-moving train is left alone so a command in flight is never doubled.
+        if (GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
+        GSController.Sleep(10);
     }
-    if (!GSVehicle.IsValidVehicle(v)) return null;
-    GSOrder.AppendOrder(v, GSMap.GetTileIndex(tx, gy), GSOrder.OF_NON_STOP_INTERMEDIATE);
-    if (GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
-    for (local w = 0; w < 40; w++) {
-        GSController.Sleep(5);
-        if (GSVehicle.IsValidVehicle(v) && GSMap.GetTileX(GSVehicle.GetLocation(v))==tx && GSMap.GetTileY(GSVehicle.GetLocation(v))==gy) { GSVehicle.StartStopVehicle(v); break; }
-    }
-    return v;
+    return (GSVehicle.IsValidVehicle(v) && !GSVehicle.IsStoppedInDepot(v));
 }
 
-// Build a reader vehicle, RETRYING BuildVehicle aggressively until valid.
-function XorSum1Main::BuildReader(wd, ed) {
+// STAGE 2 (DETERMINISTIC INPUT PLACEMENT): park an input train so it RESTS inside the gate's
+// protected input block [sigx..sigtx] BY CONSTRUCTION, confirmed before the reader runs, instead
+// of catching a moving train on a single tap tile (the SC2/fasum flake: a train that crosses the
+// tap between polls overshoots to the east depot and the input reads wrongly ABSENT).
+//
+// MECHANISM. The input drops from feeder depot d (north of the tap) onto tap tile (tx,gy) heading
+// EAST, ordered to the tap. With reliable egress it leaves the depot; then we WATCH its position
+// and FREEZE it (one StartStop) the first poll its x is at or past the tap and still inside the
+// protected block [sigx..sigtx]. The freeze leaves it occupying the input block, which is all the
+// NOR read needs (presence anywhere in [sigx..sigtx], not the exact tap tile). CONFIRM-AND-REBUILD:
+// if it never left the depot, or overshot past sigtx (the east depot), we tear it down and rebuild,
+// up to a budget. Returns the train (parked, confirmed in-block) or null on exhaustion.
+function XorSum1Main::ParkInput(d, tx, gy, dx, dy, sigx, sigtx) {
+    for (local attempt = 0; attempt < 4; attempt++) {
+        local v = null;
+        for (local b = 0; b < 20; b++) {
+            v = GSVehicle.BuildVehicle(d, this.eng);
+            if (GSVehicle.IsValidVehicle(v)) break;
+            GSController.Sleep(6);
+        }
+        if (!GSVehicle.IsValidVehicle(v)) { GSController.Sleep(8); continue; }
+        GSOrder.AppendOrder(v, GSMap.GetTileIndex(tx, gy), GSOrder.OF_NON_STOP_INTERMEDIATE);
+        // reliable egress: leave the feeder depot deterministically (no double-toggle).
+        if (!this.NudgeEgress(v, dx, dy)) { this.Scrap(v, d); continue; }
+        // watch the train roll east along the lane; FREEZE the first poll it is inside the
+        // protected block at or past the tap. A fixed, dense watch so the single-tile tap is not
+        // skipped: we accept any x in [tx..sigtx] (the whole input block east of the tap).
+        local parked = false;
+        for (local w = 0; w < 60; w++) {
+            GSController.Sleep(3);
+            if (!GSVehicle.IsValidVehicle(v)) break;
+            local cx = this.Tx(v); local cy = this.Ty(v);
+            if (cy == gy && cx >= tx && cx <= sigtx) { GSVehicle.StartStopVehicle(v); parked = true; break; }
+            if (cy == gy && cx > sigtx) break;   // overshot past the block -> rebuild
+        }
+        if (!parked) { this.Scrap(v, d); continue; }
+        // CONFIRM it came to rest inside the block (the freeze toggle is async; give it a beat,
+        // then verify it is stationary in [sigx..sigtx]). If it drifted out, rebuild.
+        for (local s = 0; s < 16; s++) {
+            GSController.Sleep(4);
+            if (!GSVehicle.IsValidVehicle(v)) break;
+            if (GSVehicle.GetCurrentSpeed(v) == 0) break;
+        }
+        if (GSVehicle.IsValidVehicle(v)) {
+            local cx = this.Tx(v); local cy = this.Ty(v);
+            if (cy == gy && cx >= sigx && cx <= sigtx) return v;   // confirmed resting in-block
+        }
+        this.Scrap(v, d);
+    }
+    return null;
+}
+
+// Dispose a stray input/reader: send it home to depot d if it is on track, then sell it. Guarded so
+// a mid-track sell (which fails) never leaks the train; if it will not reach a depot we leave it
+// stopped where it is (a wrongly-built input is rare and the rebuild loop replaces it).
+function XorSum1Main::Scrap(v, d) {
+    if (v == null || !GSVehicle.IsValidVehicle(v)) return;
+    if (GSVehicle.IsStoppedInDepot(v)) { GSVehicle.SellVehicle(v); return; }
+    while (GSOrder.GetOrderCount(v) > 0) { if (!GSOrder.RemoveOrder(v, 0)) break; }
+    GSOrder.AppendOrder(v, d, GSOrder.OF_NON_STOP_INTERMEDIATE);
+    if (GSVehicle.IsValidVehicle(v) && GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
+    for (local s = 0; s < 40; s++) {
+        if (!GSVehicle.IsValidVehicle(v) || GSVehicle.IsStoppedInDepot(v)) break;
+        GSController.Sleep(6);
+    }
+    if (GSVehicle.IsValidVehicle(v) && GSVehicle.IsStoppedInDepot(v)) GSVehicle.SellVehicle(v);
+}
+
+// Build a reader vehicle and CONFIRM it has left its west depot (STAGE 1 egress hardening).
+// RETRYING BuildVehicle aggressively until valid, then driving egress with the one-toggle-per
+// -settle NudgeEgress (no double-toggle). The west depot tile is (bx-1, gy); a reader that leaves
+// it deterministically is the fix for the raw x = -1 misses (a reader that never left its depot).
+// On a stuck egress the reader is scrapped and rebuilt, up to a budget. Returns a moving reader or
+// null. wd is the west depot tile; (dx,dy) its coordinates; the reader is ordered to ed.
+function XorSum1Main::BuildReader(wd, ed, dx, dy) {
     if (!GSRail.IsRailDepotTile(wd))
         for (local d = 0; d < 10 && !GSRail.IsRailDepotTile(wd); d++) GSController.Sleep(5);
-    local v = null;
-    for (local b = 0; b < 40; b++) {
-        v = GSVehicle.BuildVehicle(wd, this.eng);
-        if (GSVehicle.IsValidVehicle(v)) break;
+    for (local attempt = 0; attempt < 4; attempt++) {
+        local v = null;
+        for (local b = 0; b < 40; b++) {
+            v = GSVehicle.BuildVehicle(wd, this.eng);
+            if (GSVehicle.IsValidVehicle(v)) break;
+            GSController.Sleep(8);
+        }
+        if (!GSVehicle.IsValidVehicle(v)) { GSController.Sleep(8); continue; }
+        GSOrder.AppendOrder(v, ed, GSOrder.OF_NON_STOP_INTERMEDIATE);
+        if (this.NudgeEgress(v, dx, dy)) return v;   // CONFIRMED out of the depot, moving east
+        // stuck in the depot: scrap and rebuild (a leftover stopped reader would jam the lane).
+        if (GSVehicle.IsValidVehicle(v) && GSVehicle.IsStoppedInDepot(v)) GSVehicle.SellVehicle(v);
         GSController.Sleep(8);
     }
-    if (!GSVehicle.IsValidVehicle(v)) return null;
-    GSOrder.AppendOrder(v, ed, GSOrder.OF_NON_STOP_INTERMEDIATE);
-    return v;
+    return null;
 }
 
 // Run a gate reader; freeze the instant it clears the terminating signal (x>=cpl) OR it left the
 // row after passing the reader signal (started down the spur). A HELD reader rests at sigx-1.
 // EXACT stageB-proven structure (no extra hardening) so it does not introduce the GS-restart flake.
 function XorSum1Main::RunFreeze(wd, ed, gy, sigx, cpl) {
-    local v = this.BuildReader(wd, ed);
+    // BuildReader now CONFIRMS egress (NudgeEgress), so the old in-function double-toggle poll is
+    // gone: a reader returned here has already left its depot (no raw x = -1 from a stuck reader).
+    local v = this.BuildReader(wd, ed, GSMap.GetTileX(wd), GSMap.GetTileY(wd));
     if (v == null) return -1;
-    GSController.Sleep(5);
-    for (local r = 0; r < 10; r++) {
-        if (GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
-        GSController.Sleep(4);
-        if (!GSVehicle.IsStoppedInDepot(v)) break;
-    }
     local fx = -1;
     for (local s = 0; s < 200; s++) {
         GSController.Sleep(3);
@@ -238,21 +321,18 @@ function XorSum1Main::RunFreeze(wd, ed, gy, sigx, cpl) {
         if (fx < 0) continue;
         local diverted = (fx > sigx && ty != gy);
         if (fx >= cpl || diverted) { GSVehicle.StartStopVehicle(v); fx = this.Tx(v); break; }
+        // a reader that re-stopped on the lane (rare) gets a single nudge per poll to keep moving.
         if (fx > sigx && fx < cpl && GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
     }
     return fx;
 }
 
-// Run the final gate reader (no freeze); record where it rests. Returns final x. EXACT stageB-proven.
+// Run the final gate reader (no freeze); record where it rests. Returns final x. Egress confirmed
+// by BuildReader (no double-toggle), so a -1 here means a genuine reader-build failure, not a stuck
+// depot egress.
 function XorSum1Main::RunReader(wd, ed) {
-    local v = this.BuildReader(wd, ed);
+    local v = this.BuildReader(wd, ed, GSMap.GetTileX(wd), GSMap.GetTileY(wd));
     if (v == null) return -1;
-    GSController.Sleep(5);
-    for (local r = 0; r < 10; r++) {
-        if (GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
-        GSController.Sleep(4);
-        if (!GSVehicle.IsStoppedInDepot(v)) break;
-    }
     local fx = -1;
     for (local s = 0; s < 28; s++) { GSController.Sleep(12); local t = this.Tx(v); if (t >= 0) fx = t; }
     return fx;
@@ -289,12 +369,16 @@ function XorSum1Main::BuildCopy(gy) {
 // Run one combo: pre-park primary inputs, then run the six readers in topological order.
 // Returns [g0a, g0b, g1, g2, g3, g4] final x.
 function XorSum1Main::RunCase(c, a, b) {
-    if (a) this.ParkInput(c.fa.aa, A_TA, c.ya);
-    if (b) this.ParkInput(c.fa.ab, A_TB, c.ya);
-    if (a) this.ParkInput(c.fa.ea, E_TA, c.ye);
-    if (b) this.ParkInput(c.fa.eb, E_TB, c.ye);
-    if (a) this.ParkInput(c.fa.b1a, B_TA, c.yb);
-    if (b) this.ParkInput(c.fa.d2b, D_TB, c.yd);
+    // Each input parks deterministically inside its OWN gate's protected block [sig..sigt]; the
+    // feeder depot is one tile NORTH of the tap (tx, gy-1). g0a taps a@A_TA,b@A_TB in [A_SIG..A_SIGT];
+    // g0b taps a@E_TA,b@E_TB in [E_SIG..E_SIGT]; g1 taps a@B_TA in [B_SIG..B_SIGT]; g2 taps b@D_TB in
+    // [D_SIG..D_SIGT].
+    if (a) this.ParkInput(c.fa.aa, A_TA, c.ya, A_TA, c.ya - 1, A_SIG, A_SIGT);
+    if (b) this.ParkInput(c.fa.ab, A_TB, c.ya, A_TB, c.ya - 1, A_SIG, A_SIGT);
+    if (a) this.ParkInput(c.fa.ea, E_TA, c.ye, E_TA, c.ye - 1, E_SIG, E_SIGT);
+    if (b) this.ParkInput(c.fa.eb, E_TB, c.ye, E_TB, c.ye - 1, E_SIG, E_SIGT);
+    if (a) this.ParkInput(c.fa.b1a, B_TA, c.yb, B_TA, c.yb - 1, B_SIG, B_SIGT);
+    if (b) this.ParkInput(c.fa.d2b, D_TB, c.yd, D_TB, c.yd - 1, D_SIG, D_SIGT);
     GSController.Sleep(8);
     // topological order: g0a, g0b (roots), then g1, g2, then g3, then g4.
     local r0a = this.RunFreeze(c.la.wd, c.la.ed, c.ya, A_SIG, A_CPL);

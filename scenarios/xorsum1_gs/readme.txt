@@ -47,9 +47,44 @@ same yield fix STATUS.md notes for SC2). Per-combo results are reported SHORT as
 runner records every distinct company name), so even a late reload does not lose the combos that
 DID complete. See the run logs for the latest reliability count.
 
+DISPATCH HARDENING (Stage 1 + Stage 2, the deterministic-dispatch fix)
+----------------------------------------------------------------------
+The per-combo READERS and INPUTS used to flake: a reader that never left its depot read raw
+x = -1, and an input train caught mid-motion on its single tap tile overshot to the east depot
+(wrongly absent). Both are the documented dispatch race. Two fixes, reusing the proven
+clock-launch egress hardening (main_clocked.nut NudgeEgress):
+
+  Stage 1 (reader/input egress): BuildReader and ParkInput now drive egress with NudgeEgress, which
+  fires EXACTLY ONE StartStopVehicle per settle and verifies the train left its depot tile before
+  returning. The old tight poll re-fired the async (queued) StartStop toggle while a prior one was
+  still in flight, double-toggling the train back to a stop (~1 in 3 fresh egresses stuck). A
+  reader that will not leave is scrapped and rebuilt (up to a budget), so no reader returns x = -1.
+
+  Stage 2 (deterministic input placement): ParkInput now CONFIRMS the input came to rest inside its
+  gate's protected block [sig..sigt] by construction, and rebuilds on a stuck egress or an
+  overshoot past sigt. The reader is dispatched only after every input is confirmed parked, so an
+  input is never caught mid-motion. The reader read needs only block occupancy (presence anywhere
+  in [sig..sigt]), so resting in-block is exactly correct.
+
+BEFORE vs AFTER (g4 reader raw x, judged externally; x = -1 == a dispatch MISS).
+  BEFORE (unhardened, 3 fresh runs x 4 combos = 12 dispatches): one run read
+    "XS1 s44 -1 -1 -1 -1" = ALL FOUR g4 readers missed (x = -1), plus the g3 readers in that run
+    also -1; the other two runs read all four. So >= 4/12 g4 misses, plus a whole-run collapse.
+  AFTER (hardened, 3 fresh runs x 4 combos = 12 dispatches): ZERO x = -1 across every readout.
+    run1 "XS1 s44 43 56 56 43 b1" = 0,1,1,0 = XOR, clean.
+    run2 "XS1 s44 43 56 56 43 b1" = 0,1,1,0 = XOR, clean.
+    run3 "XS1 s44 43 56 56 56 b0" = 0,1,1,1: ZERO dispatch misses, but b0 (a BRIDGE failed to
+      build, the SEPARATE bridge-build axis), which broke the g3->g4 coupling for c11 so g4 read
+      empty (56) and c11 read 1 instead of 0. NOT a dispatch miss.
+So the dispatch race went from common (a whole-run all-(-1) collapse) to NIL (0 misses in 12). The
+one wrong AFTER output is the independent bridge-build flake (b0), unchanged by this fix. HONEST
+COST: deterministic ParkInput trades speed for certainty (the a=1,b=1 combo's confirm-and-rebuild
+can take a few minutes), so use a generous --timeout.
+
 HOW TO RUN
 ----------
-  python tools/run_fixed.py --gsname xorsum1 --gsdir xorsum1_gs --prefix "XS1 s" \
-      --timeout 640 --runs 10 --minfields 6
+  python tools/run_fixed.py --gsname xorsum1 --gsdir xorsum1_gs --prefix "XS1" \
+      --timeout 800 --runs 3 --minfields 6 --map 9
 Readout: final "XS1 s44 <y00> <y01> <y10> <y11> b<all bridges built>", plus per-combo
-"c<ab> g3<x>/g4<x>". Judge externally: g4 x > 44 => XOR 1. Expected 0,1,1,0.
+"c<ab> g3<x>/g4<x>". Judge externally: g4 x > 44 => XOR 1. Expected 0,1,1,0. A reader/input that
+fails to dispatch would read x = -1; the hardened dispatch produces none.
