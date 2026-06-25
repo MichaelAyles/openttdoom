@@ -507,3 +507,18 @@ own ramps so the ramp tiles must be EMPTY of rail (pre-laying rail there fails t
 carries the perpendicular lane, verify-under-rail + retry. So a flat-lane network is no longer capped at
 depth-1: any spur crossing is now a bridge. The full-adder SUM (parity, ~28 crossings) is now mechanical
 replication of this proven primitive, not an unknown.
+
+UPDATE 4 (the bridged XOR is RELIABLE; the full-adder SUM chain computes; the blocker is bridge-build at
+scale). Routing the reconvergent XOR coupling as a BRIDGE (`scenarios/xorsum1_gs/`) fixes BOTH planarity
+AND the stageB ~57% far-push flake: the half-adder sum a^b reads 0,1,1,0 with all bridges built (b1), all
+four combos, orchestrator-confirmed in a clean sole-process run (`XS1 s44 43 56 56 43 b1` = 0,1,1,0). The
+full-adder SUM = parity = XOR(XOR(a,b),cin) as two chained bridged-XOR stages (`scenarios/fasum_gs/`) is
+BUILT and its chain COMPUTES end to end (combo 000: XOR1 -> h=0 -> XOR2 -> s=0 = parity(0,0,0)=0), but it
+does NOT close all 8 combos: at 48 bridges per run the bridge-BUILD itself flakes (b0 = a bridge missed its
+12-retry budget), and a failed bridge breaks the coupling it carries, corrupting cin-dependent combos. So
+the two-stacked-XOR chain MECHANISM is proven; the remaining blockers are bridge-build RELIABILITY at scale
+(a more robust BuildOneBridge: more retries, demolish-and-rebuild on failure) and build SPEED (~9 min for
+48 bridges). HARNESS LESSON (cost real debugging time): the apparent "OpenTTD reloads the GS / crashes
+mid-run" was SELF-INFLICTED by overlapping test processes, a leftover run_fixed zombie's per-run "taskkill
+openttd" kills the live run's server, masquerading as a GS restart. NEVER run more than one run_fixed /
+openttd at a time; hard-kill all stray python + openttd before each run.
