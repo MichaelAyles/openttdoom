@@ -493,3 +493,17 @@ reads. That is exactly why the toggle, one fixed gate read of the held bit with 
 reliable. The reused-single-lane, GS-dispatched-per-read architecture hits the wall; a build-once fixed
 network is the path. Same lesson as the SC2 work, now with the precise mechanism for a sequential
 datapath.
+
+UPDATE 3 (the BRIDGE crossing is BUILT, the planarity frontier is CROSSED). The in-game bridge primitive
+predicted above now works (`scenarios/bridgeprobe_gs/`): a signal-free coupling spur carrying a bit
+crosses an independent gate's perpendicular reader lane routed as a length-3 rail BRIDGE over the lane,
+and BOTH nets compute correctly from raw positions, identical across 4 fresh servers (orchestrator
+re-confirmed 2/2): readout `BP cs36 ls36 br 35 44 44 35` = the coupling still transfers the bit through
+the bridge AND the crossed lane still computes, not shorted. A level-crossing CONTROL (`BP lv 35 35 35 35`)
+shows the short the bridge removes (the level junction merges both tracks into one block). The bridge
+composes into reconvergent logic: `scenarios/xorbridge_gs/` is a NON-PLANAR AND whose g0->g2 coupling spur
+bridges over g1's lane, computing 0,0,0,1 = AND. The OpenTTD 15.3 recipe is pinned: BuildBridge builds its
+own ramps so the ramp tiles must be EMPTY of rail (pre-laying rail there fails the build), the under-tile
+carries the perpendicular lane, verify-under-rail + retry. So a flat-lane network is no longer capped at
+depth-1: any spur crossing is now a bridge. The full-adder SUM (parity, ~28 crossings) is now mechanical
+replication of this proven primitive, not an unknown.
