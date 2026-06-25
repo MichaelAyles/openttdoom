@@ -419,6 +419,55 @@ own fresh runs (carry `STBC s38 37 37 37 43` = 0,0,0,1; the 6-gate XOR `STGB s49
 2/2 clean). Reliability caveat: the XOR reconvergent gate freeze flakes about 1 in 4 (whole-run all-ones);
 the carry and the 3-gate chain are solid. So the central composition wall is broken at the half-adder
 scale; what remains is scaling further (a multi-bit carry chain) and hardening the reconvergence freeze.
+
+UPDATE 2 (the reconvergence freeze HARDENED, and the no-bridge planarity FRONTIER pinned). Two results.
+
+(a) The stageB XOR reconvergent-gate freeze flake was DIAGNOSED and HARDENED in `scenarios/stageBhard_gs/`.
+The DOMINANT cause turned out to be a TRANSIENT BUILD failure, not the freeze itself. Right after the
+heavy per-copy build the OpenTTD command queue stays busy, and a single GSVehicle.BuildVehicle returns an
+INVALID handle (a reader x of -1: the read silently fails, so the coupling never delivers and the run reads
+wrong). THE KEY FIX: retry every BuildVehicle until valid (BuildReader / ParkInput, up to 40 tries with a
+settle and a depot-exists pre-check). With that, plus SignalVerified (confirm-and-retry every signal build
+so a gap never turns a freeze block into a dead end), per-case settle delays, and the PATIENT far-freeze
+(RunFreezeFar, 420 polls), the 6-gate XOR reads 0,1,1,0 when g3 freezes (every clean run is exactly
+"STBH s49 48 54 54 48"). NOTE the g3->g4 spur MUST be built UP FRONT (a tried alternative, deferring it
+until after g3 freezes, made g3 freeze cleanly but BROKE the coupling: adding spur track after the train
+is already stopped does not merge that stopped train's occupancy into g4's block in 15.3, so g4 read empty
+and every combo passed). HONEST RELIABILITY: this did NOT reach >=9/10. The BuildVehicle retry removed the
+transient-invalid-build path (the earlier dominant all-ones cause), but a SECOND deeper flake remains: g3
+(the reconvergence) short-freezes (held at its terminating signal near x42, diagnostic c42) and the patient
+budget recovers it only SOMETIMES. Across the fresh clean-version runs the XOR read 0,1,1,0 in about 4 of 7
+(diagnostic 3/3 c50, then a confirmation that flaked: 0,1,1,1 c42, 0,1,1,0 c50, 1,1,1,1 c42, ...), i.e. the
+g3 short-freeze flakes ~40 percent of runs, sometimes for the WHOLE run (all-ones). So the XOR is BUILT and
+COMPUTES (every clean run is exactly 0,1,1,0), but the g3 reconvergent FAR-FREEZE is ~60 percent reliable.
+The real fix is a freeze independent of the merged g3-g4 block settling (a physical output register, the
+blocker-1 reservation-coupling obstacle). The companion CARRY (majority) is reliable (clean 8/8) precisely
+because its output gate is a TERMINAL read, no far-pushed reconvergent freeze. See `scenarios/stageBhard_gs/`.
+
+(b) THE NO-BRIDGE PLANARITY FRONTIER, pinned precisely. A crossing-free FLAT-LANE fixed train network (no
+bridges) tops out at DEPTH-1 reconvergence. A coupling spur is a vertical track segment; it shorts any
+foreign lane whose horizontal track shares that column on the rows it spans. The proven XOR works because
+its single reconvergent gate sits BETWEEN its two drivers (spurs to adjacent rows, zero foreign crossings),
+with only its one output spur far-pushed east of the lanes it crosses. The full-adder CARRY cout =
+majority(a,b,cin) = NOR3(NOR(a,b),NOR(a,cin),NOR(b,cin)) is ALSO depth-1 (three root NORs feeding one
+terminal 3-input NOR) and builds crossing-free with one far-push: `scenarios/fulladder_cout_gs/`, VERIFIED
+in game ALL EIGHT combos in one clean run, readout "FC40 39 39 39 45 39 45 45 45" = 0,0,0,1,0,1,1,1 =
+majority(a,b,cin), judged from the RAW gm reader x (x > 40 => 1). So the full-adder CARRY computes as a
+fixed NOR network on trains, all 8 combos. But the
+full-adder SUM = a XOR b XOR cin = parity(a,b,cin) is NON-MONOTONE, so it CANNOT be a single NOR-of-roots
+(depth-1); it needs depth >= 2 reconvergence. For the COMPACT 12-gate parity netlist (a majority term, a
+3-input AND, and a count==1 term, all feeding one output), a flat-lane layout generator produced ~28
+unavoidable spur crossings: that netlist's interleaved deep reconvergences are non-planar and would need
+bridges. HOWEVER the SUM is ALSO expressible as TWO chained depth-1 XOR blocks (h = a XOR b, then
+s = h XOR cin), each XOR individually crossing-free (the proven stageB layout). Two such blocks STACKED
+and joined by a short half-sum coupling (h's frozen driver fanned to the second block via three SAFE
+single-driver spurs, h duplicated as three NOTs of g3, all coupling-only consumers) is ~14 lanes and is
+PLAUSIBLY crossing-free, i.e. bridge-free. That layout is designed but was NOT built/verified here (a large
+14-lane x 8-combo build, out of this run's time budget). So precisely: the half-adder SUM (XOR, depth-1)
+and the full-adder CARRY (majority, depth-1) are PROVEN crossing-free; the full-adder SUM is reachable
+EITHER as a bridge-using flat parity netlist (ties to blocker 4) OR, recommended, as a bridge-free
+two-stacked-XOR. The full adder's two outputs are both reachable; only the SUM build itself was deferred.
+
 The original analysis (kept for the record):
 
 The self-feeding 1-bit TOGGLE works (`scenarios/toggle_gs/`, next = NOT held Q, no schedule). Scaling
