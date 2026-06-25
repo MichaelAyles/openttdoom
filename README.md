@@ -67,6 +67,8 @@ In OpenTTD, on real trains (judged from raw train positions, never from script):
 - **Multi-gate ARITHMETIC composes**: a 1-bit HALF-ADDER as a fixed physical NOR network (the 6-gate
   XOR sum 0,1,1,0 and the AND carry 0,0,0,1), each gate its own lane wired by fixed spurs, nothing
   re-parked between reads, outputs from raw positions. The architecture that scales to a real datapath.
+- **A 3-input gate computes**: the full-adder CARRY, majority(a,b,cin) = 0,0,0,1,0,1,1,1, clean 8/8 as
+  a fixed network (depth-1 with a terminal read). The full-adder SUM needs the bridge primitive next.
 - **Shown in-game**: the gorgeous raycaster frame stamped as on-map signal tiles, a rail portrait
   of a placed circuit, and clock-stepped Fibonacci (1,1,2,3,5,8,13) running on real gate lanes.
 - **OpenTTD builds from source here** (MSVC 2022), and a first speed fork gives ~3x on a bare map.
@@ -82,10 +84,14 @@ four were just closed; the other two are now sharply characterized:
    0,0,0,1, each gate its own lane wired by fixed spurs, NO train re-parked between reads, outputs
    from raw positions, STUCK.md #9). This is the architecture that works: the reused-lane,
    re-park-per-read version (a self-feeding Fibonacci adder) collapsed to zero terms, while the
-   fixed network composes past two gates and does real arithmetic. What remains is scaling it: a
-   multi-bit ripple carry chain, and hardening the one flaky spot (the XOR reconvergent gate freeze
-   misses about 1 in 4). The path from a half-adder to the full machine is now an engineering ramp,
-   not a wall.
+   fixed network composes past two gates and does real arithmetic. Scaling it further pinned the
+   NEXT primitive precisely: the full-adder CARRY (majority) also computes as a fixed network
+   (clean 8/8), but the full-adder SUM (parity) is non-monotone, so it needs depth-2 reconvergence
+   whose coupling spur crosses lanes, and a flat-lane network is non-planar there (~28 unavoidable
+   crossings). So the next thing to build in game is the BRIDGE crossing (what the software router
+   already does with `Route.bridges`); that unblocks the sum, then the ripple, then the datapath.
+   The XOR's residual ~1-in-4 flake is the same output-register / reservation-coupling obstacle as
+   blocker 3.
 2. **Router DRC at scale: RESOLVED.** The full CPU (1631 cells) and the large raycaster FSM cones now
    place and route 100 percent of nets with 0 DRC (was ~410), the clock reaching every register, logic
    preserved, all 381 tests green (STUCK.md #8). So the toolchain produces a cleanly buildable full
