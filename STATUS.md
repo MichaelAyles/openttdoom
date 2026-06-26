@@ -272,6 +272,34 @@ ALU, CPU, raycaster FSM), the synth/register/sequential spine, and place-and-rou
   fix, not more retry-tuning, is the open item and the enabler for SC3 (the emitted adder). Run with
   `tools/run_or.py`; see scenarios/computecell_gs/ (RunCopyOR/ParkInputConfirmed/BuildAndLaunch) and
   readme.txt Stage 2.
+  NOW BUILT AND PROVEN (the deterministic-dispatch fix, the "real fix" above): the per-combo dispatch race
+  was retired with two mechanism-level changes reusing the proven clock-launch egress hardening (the
+  clockgate main_clocked.nut NudgeEgress: ONE StartStopVehicle per settle, movement-verified, never the
+  async double-toggle). STAGE 1, reader/input EGRESS via NudgeEgress + scrap-and-rebuild, so no reader
+  returns raw x = -1 from a stuck depot. STAGE 2, ParkInput CONFIRMS each input RESTS inside its gate's
+  protected block [sig..sigt] by construction (rebuild on a stuck egress or overshoot), and dispatches the
+  reader only after every input is confirmed parked, so an input is never caught mid-motion. PROVEN on the
+  bridged XOR (scenarios/xorsum1_gs/, 4 combos), judged from RAW g4 reader x (x = -1 == a MISS): BEFORE
+  (unhardened) one of 3 fresh runs read "XS1 s44 -1 -1 -1 -1" = ALL FOUR readers missed (a whole-run
+  collapse), >= 4/12 g4 misses; AFTER (hardened) ZERO x = -1 across all 3 fresh runs x 4 combos (run1/run2
+  = 0,1,1,0 = XOR clean; run3 = 0,1,1,(1) with ZERO dispatch misses but a SEPARATE bridge-build flake b0
+  breaking c11's coupling). So the per-combo miss rate went from common to NIL. The fix is in both
+  scenarios/xorsum1_gs/main.nut and scenarios/fulladder_gs/main.nut (NudgeEgress/Scrap/ParkInput/
+  BuildReader); see STUCK.md #9 UPDATE 6 and scenarios/xorsum1_gs/readme.txt for the BEFORE/AFTER and the
+  honest cost (deterministic ParkInput trades speed for certainty).
+  PARTLY IMPROVED (the reconvergent-READ axis, ~40% -> ~80%, NOT closed): with dispatch deterministic, the
+  bridged XOR still read the WRONG value ~half the time, always on c00/c01 (the reconvergent gate g3 -> g4).
+  One root cause was geometry: g3's coupling block was the narrow 2 tiles [45..46], and the async StartStop
+  freeze let g3 DRIFT past C_TERM2 into a block disconnected from the g3 -> g4 spur, so g4 read empty and
+  wrongly passed (c00 g4=56 where it should be 43). The OVERSHOOT was fixed by (i) WIDENING g3's coupling
+  block to [45..50] so the drift is absorbed, and (ii) a dedicated RunG3Freeze that PINS g3 in the coupling
+  block and CONFIRMS the landing before g4 is dispatched. RESULT (honest, the build-agent "5/5 fixed"
+  CORRECTED): ~40% -> ~80% logic-clean across build (6/8), adversarial verify (4/5), and orchestrator (3/3)
+  fresh sole-process runs = ~13/16 reading "XS1 s44 43 56 56 43 b1" = 0,1,1,0, b1, zero x=-1. NOT closed:
+  the adversarial verify caught a SEPARATE residual, a g3 reader-EGRESS UNDERSHOOT stall (g3 stalls at x=36,
+  west of its held position, never reaches the coupling block, indistinguishable from a held output-0, so
+  c00 fails ~1/5). The reconvergent-OVERSHOOT axis is fixed; a reconvergent reader-EGRESS-STALL axis remains
+  (~1/5), fix = the rebuild-on-stall budget ParkInput has, not yet built. See STUCK.md #9 UPDATE 7.
 
 ### M3, toolchain spine. DONE, verified in software.
 

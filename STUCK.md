@@ -606,3 +606,35 @@ the central reliability wall has TWO axes: DISPATCH MISSES (now fixed) and RECON
 the g3/g4 freeze precision through the bridge), plus the 48-bridge build (b0) and the heavy-combo hang. The
 dispatch fix is real and banked; the reconvergent-freeze precision is the next target. Build-hang fix:
 chunked Prepare into 24-row yielded strips (a single 22000-tile LevelTiles froze the map-10 tick loop).
+
+UPDATE 7 (the reconvergent-OVERSHOOT axis fixed, bridged XOR ~40% -> ~80% logic-clean, a residual egress
+-stall remains, NOT closed). The reconvergent-freeze precision flagged above as "the next target" was
+diagnosed and improved deterministically
+in scenarios/xorsum1_gs/main.nut. ROOT CAUSE (geometry, not tuning): g3's coupling block was the NARROW
+2 tiles [C_CPL..C_TERM2] = [45..46]. The g3->g4 spur drops at column 45 and the whole spur (top corner on
+g3's lane, both bridges, g4's input tap) is ONE signal block, so a passing g3 frozen ANYWHERE in [45..46]
+occupies g4's input. But the freeze fired an ASYNC StartStopVehicle at fx>=45 and the train DRIFTED a tile
+or two before physically stopping; on a 2-tile window the drift could carry g3 PAST C_TERM2=46 into the
+[46..52] block, which is DISCONNECTED from the spur. g4 then read empty and wrongly PASSED (the c00 "g3
+passed but did not deliver" flake, g4=56 where it should be held at 43). THE FIX, two parts, both
+deterministic by construction (reusing the norchain freeze-on-coupling-tile and the bridgeprobe coupling):
+  (i) WIDEN the coupling block: C_TERM2 moved 46 -> 50 (C_EAST 52 -> 54), so g3's coupling block is the
+      6-tile through block [45..50], all connected to the spur at column 45; any rest in [45..49] occupies
+      the spur, so the freeze drift is ABSORBED. Nothing else uses g3's row east of 44, so it is safe.
+  (ii) A DEDICATED g3 freeze (RunG3Freeze) that PINS and VERIFIES the landing: when g3 passes it is driven
+      to rest at or past C_CPL=45 and strictly WEST of C_TERM2 (re-nudged off the ambiguous C_SIGT=44 tile
+      if it stalls), and the rest is CONFIRMED inside [C_CPL..C_TERM2) on-row (or diverted into the spur
+      off-row) BEFORE g4 is dispatched. A genuinely HELD g3 rests at C_SIG-1 and is returned as-is (out 0).
+RESULT (honest, the build-agent claim of "5/5, closed" CORRECTED by the orchestrator + adversarial verify):
+a REAL but PARTIAL improvement, the OVERSHOOT axis fixed, ~40% -> ~80% logic-clean, NOT closed. Across the
+build agent (6/8), the adversarial verifier (4/5), and the orchestrator's own (3/3) fresh sole-process runs
+= ~13/16 (~80%) reading "XS1 s44 43 56 56 43 b1" = 0,1,1,0, all b1, zero x=-1, up from ~2/5. When g3 reaches
+its coupling block it now lands EXACTLY on x=45 (the overshoot-past-C_TERM2 drift is genuinely fixed by the
+widened block + pin). BUT the axis is NOT closed: the adversarial verify caught a SEPARATE residual root
+cause, a g3 reader-EGRESS UNDERSHOOT stall, g3 stalls mid-lane at x=36 (WEST of even its held position 40),
+never reaches the coupling block, and is INDISTINGUISHABLE from a genuine held output-0, so RunG3Freeze
+accepts it and g4 wrongly passes (c00 fails ~1/5). The code targets the overshoot, not this undershoot. So
+the reconvergent-OVERSHOOT axis is FIXED; a reconvergent reader-EGRESS-STALL axis REMAINS (~1/5), whose fix
+is the SAME rebuild-on-stall budget ParkInput has (scrap and re-dispatch g3 if it is frozen behind its own
+reader signal when it should be deciding), not yet built. Separate unchanged limiters: the 48-bridge build
+reliability (b0) at full-adder scale, and heavy-combo speed.
