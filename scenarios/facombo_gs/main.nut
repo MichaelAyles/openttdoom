@@ -69,7 +69,18 @@ COMBO_SEL <- 0;   // RUNNER-REWRITTEN: 0..7 = abc 000..111
 
 class FaComboMain extends GSController {
     company = null; eng = null; allbr = true;
-    constructor() {}
+    // OCCUPANCY GUARD (the combo-111 heavy-combo fix). Each gate's protected input block is one rail
+    // row [sig..sigt]. A block-signal NOR reads "ANY input present in the block" (the block is occupied
+    // => the signal is red => the reader is held), so a SINGLE parked train fully implements the input
+    // for a multi-input gate. The all-ones combo 111 is the only case that drives BOTH inputs of the
+    // shared gates (g0a,g0b,R1,R2,R3) present at once; parking a SECOND train into a block the first
+    // train already occupies can NEVER succeed (the second train is stopped at the depot exit by the
+    // red signal of the occupied block) and burns ParkInput's full ~88s 4-attempt budget each time, so
+    // five redundant double-parks blow the run past the timeout and the readout never latches (the
+    // documented "FA built1 b1" freeze). occRows records the rows that already hold a parked input;
+    // ParkOcc skips a redundant second park on an already-occupied row (a fast no-op, logic identical).
+    occRows = null;
+    constructor() { this.occRows = {}; }
 }
 
 function FaComboMain::PickEngine(rt) {
@@ -278,6 +289,19 @@ function FaComboMain::ParkInput(d, tx, gy, dx, dy, sigx, sigtx) {
     }
     return null;
 }
+// OCCUPANCY-GUARDED park: park an input ONLY if its gate row (gy) is not already occupied by a sibling
+// input. A block-signal NOR is held iff ANY input is present in [sigx..sigtx], so once the first input
+// of a multi-input gate is parked the block is occupied and the gate's value is final; a second input
+// on the SAME row is logically redundant AND physically unparkable (the occupied block's red signal
+// stops it at the depot exit, so ParkInput would burn its full retry budget and return null). This is
+// the combo-111 fix: skip the redundant second park (a fast no-op) instead of stalling ~88s on it. The
+// LOGIC is identical (the NOR still reads the block as occupied); the output is still raw reader x.
+function FaComboMain::ParkOcc(d, tx, gy, dx, dy, sigx, sigtx) {
+    if (gy in this.occRows) return this.occRows[gy];   // already occupied by a sibling: redundant, skip
+    local v = this.ParkInput(d, tx, gy, dx, dy, sigx, sigtx);
+    if (v != null) this.occRows[gy] <- v;              // record the row as occupied for this combo
+    return v;
+}
 // Build a reader and CONFIRM it left its west depot (STAGE 1 egress hardening). (dx,dy) is the west
 // depot tile; scrap-and-rebuild on a stuck egress. Fixes the raw x = -1 misses (stuck readers).
 function FaComboMain::BuildReader(wd, ed, dx, dy) {
@@ -330,12 +354,26 @@ function FaComboMain::RunFreezeFar(wd, ed, gy, sigx, cpl) {
     }
     return fx;
 }
+// Run a final output reader; record where it rests. Returns final raw x. RETRY-ON-MISS: a final
+// output reader that returns -1 is a pure dispatch miss (BuildReader's egress failed all its attempts,
+// or the freshly built reader never moved) - the documented residual dispatch-miss axis, which on the
+// heavy combo 111 showed as the CARRY gm reader intermittently not launching (FC40 -1) even though the
+// SUM read cleanly. A -1 carries no logic information, so we scrap the stuck reader and rebuild the
+// whole read up to a few times; the first attempt that yields a real position wins. This costs nothing
+// on the common case (a reader that launches returns on attempt 1) and removes the -1 misses. The
+// output is still ONLY the raw reader x; nothing is computed in Squirrel.
 function FaComboMain::RunReader(wd, ed) {
-    local v = this.BuildReader(wd, ed, GSMap.GetTileX(wd), GSMap.GetTileY(wd));
-    if (v == null) return -1;
-    local fx = -1;
-    for (local s = 0; s < 24; s++) { GSController.Sleep(12); local t = this.Tx(v); if (t >= 0) fx = t; }
-    return fx;
+    for (local attempt = 0; attempt < 4; attempt++) {
+        local v = this.BuildReader(wd, ed, GSMap.GetTileX(wd), GSMap.GetTileY(wd));
+        if (v == null) { GSController.Sleep(10); continue; }
+        local fx = -1;
+        for (local s = 0; s < 24; s++) { GSController.Sleep(12); local t = this.Tx(v); if (t >= 0) fx = t; }
+        if (fx >= 0) return fx;
+        // never moved (stuck reader): scrap it and rebuild so it does not foul the lane, then retry.
+        this.Scrap(v, wd);
+        GSController.Sleep(8);
+    }
+    return -1;
 }
 
 // THE RECONVERGENT FREEZE (deterministic coupling-tile landing), PORTED VERBATIM from xorsum1 (PROVEN
@@ -468,16 +506,20 @@ function FaComboMain::BuildCopy(gy) {
 
 // Run one combo (a,b,cin): run the SUM network -> s, then the CARRY network -> cout. VERBATIM.
 function FaComboMain::RunCase(c, a, b, cin) {
-    // SUM primaries (each parks deterministically inside its OWN gate's protected block [sig..sigt];
-    // feeder depot one tile NORTH of the tap).
-    if (a) this.ParkInput(c.fa.aa, A_TA, c.ya, A_TA, c.ya - 1, A_SIG, A_SIGT);
-    if (b) this.ParkInput(c.fa.ab, A_TB, c.ya, A_TB, c.ya - 1, A_SIG, A_SIGT);
-    if (a) this.ParkInput(c.fa.ea, E_TA, c.ye, E_TA, c.ye - 1, E_SIG, E_SIGT);
-    if (b) this.ParkInput(c.fa.eb, E_TB, c.ye, E_TB, c.ye - 1, E_SIG, E_SIGT);
-    if (a) this.ParkInput(c.fa.b1a, B_TA, c.yb, B_TA, c.yb - 1, B_SIG, B_SIGT);
-    if (b) this.ParkInput(c.fa.d2b, D_TB, c.yd, D_TB, c.yd - 1, D_SIG, D_SIGT);
-    if (cin) this.ParkInput(c.fc.nc, NC_TCIN, c.ync, NC_TCIN, c.ync - 1, NC_SIG, NC_SIGT);
-    if (cin) this.ParkInput(c.fc.p, P_TCIN, c.yp, P_TCIN, c.yp - 1, P_SIG, P_SIGT);
+    // SUM primaries. ParkOcc parks deterministically inside the gate's protected block [sig..sigt] but
+    // SKIPS a redundant second park on an ALREADY-OCCUPIED gate row (the combo-111 fix): gates g0a (row
+    // ya) and g0b (row ye) take BOTH a and b, so on the all-ones case the second input's block is already
+    // held by the first, the second train cannot enter, and parking it would burn ParkInput's full ~88s
+    // budget for no logic change. A block-signal NOR reads the block as occupied iff ANY input is present.
+    this.occRows = {};   // fresh per-combo occupancy (one combo per run, but keep it clean)
+    if (a) this.ParkOcc(c.fa.aa, A_TA, c.ya, A_TA, c.ya - 1, A_SIG, A_SIGT);
+    if (b) this.ParkOcc(c.fa.ab, A_TB, c.ya, A_TB, c.ya - 1, A_SIG, A_SIGT);
+    if (a) this.ParkOcc(c.fa.ea, E_TA, c.ye, E_TA, c.ye - 1, E_SIG, E_SIGT);
+    if (b) this.ParkOcc(c.fa.eb, E_TB, c.ye, E_TB, c.ye - 1, E_SIG, E_SIGT);
+    if (a) this.ParkOcc(c.fa.b1a, B_TA, c.yb, B_TA, c.yb - 1, B_SIG, B_SIGT);
+    if (b) this.ParkOcc(c.fa.d2b, D_TB, c.yd, D_TB, c.yd - 1, D_SIG, D_SIGT);
+    if (cin) this.ParkOcc(c.fc.nc, NC_TCIN, c.ync, NC_TCIN, c.ync - 1, NC_SIG, NC_SIGT);
+    if (cin) this.ParkOcc(c.fc.p, P_TCIN, c.yp, P_TCIN, c.yp - 1, P_SIG, P_SIGT);
     GSController.Sleep(8);
     // SUM XOR1 -> freeze g4 = h
     this.RunFreeze(c.la.wd, c.la.ed, c.ya, A_SIG, A_CPL);  GSController.Sleep(6);
@@ -502,13 +544,16 @@ function FaComboMain::RunCase(c, a, b, cin) {
     this.RunFreeze(c.lq.wd, c.lq.ed, c.yq, Q_SIG, Q_CPL);  GSController.Sleep(40);
     local s = this.RunReader(c.lyy.wd, c.lyy.ed);
 
-    // CARRY primaries (each its OWN parked trains, deterministic placement in [sig..sigt]).
-    if (a)   this.ParkInput(c.fm.r1a, R1_TA, c.y1, R1_TA, c.y1 - 1, R1_SIG, R1_SIGT);
-    if (b)   this.ParkInput(c.fm.r1b, R1_TB, c.y1, R1_TB, c.y1 - 1, R1_SIG, R1_SIGT);
-    if (a)   this.ParkInput(c.fm.r2a, R2_TA, c.y2, R2_TA, c.y2 - 1, R2_SIG, R2_SIGT);
-    if (cin) this.ParkInput(c.fm.r2c, R2_TC, c.y2, R2_TC, c.y2 - 1, R2_SIG, R2_SIGT);
-    if (b)   this.ParkInput(c.fm.r3b, R3_TB, c.y3, R3_TB, c.y3 - 1, R3_SIG, R3_SIGT);
-    if (cin) this.ParkInput(c.fm.r3c, R3_TC, c.y3, R3_TC, c.y3 - 1, R3_SIG, R3_SIGT);
+    // CARRY primaries. Same ParkOcc occupancy guard: R1 (row y1, a+b), R2 (row y2, a+cin) and R3 (row
+    // y3, b+cin) are the majority network's shared two-input gates, all driven on the all-ones combo, so
+    // their redundant second parks are skipped exactly like the SUM's g0a/g0b. The CARRY occupancy is
+    // tracked alongside the SUM in occRows (every gate is on its own unique row, so the keys never clash).
+    if (a)   this.ParkOcc(c.fm.r1a, R1_TA, c.y1, R1_TA, c.y1 - 1, R1_SIG, R1_SIGT);
+    if (b)   this.ParkOcc(c.fm.r1b, R1_TB, c.y1, R1_TB, c.y1 - 1, R1_SIG, R1_SIGT);
+    if (a)   this.ParkOcc(c.fm.r2a, R2_TA, c.y2, R2_TA, c.y2 - 1, R2_SIG, R2_SIGT);
+    if (cin) this.ParkOcc(c.fm.r2c, R2_TC, c.y2, R2_TC, c.y2 - 1, R2_SIG, R2_SIGT);
+    if (b)   this.ParkOcc(c.fm.r3b, R3_TB, c.y3, R3_TB, c.y3 - 1, R3_SIG, R3_SIGT);
+    if (cin) this.ParkOcc(c.fm.r3c, R3_TC, c.y3, R3_TC, c.y3 - 1, R3_SIG, R3_SIGT);
     GSController.Sleep(8);
     this.RunFreeze(c.l1.wd, c.l1.ed, c.y1, R1_SIG, R1_CPL);  GSController.Sleep(6);
     this.RunFreeze(c.l2.wd, c.l2.ed, c.y2, R2_SIG, R2_CPL);  GSController.Sleep(6);

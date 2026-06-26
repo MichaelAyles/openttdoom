@@ -16,15 +16,27 @@ Expected:  sum  = parity(a,b,cin)   = 0,1,1,0,1,0,0,1
   100 | c100 s60 m39       |   60   1  |    39    0  |    1       0     | BOTH CORRECT  | verify
   101 | FA50 49 / FC40 48  |   49   0  |    48    1  |    0       1     | BOTH CORRECT  | verify
   110 | (verify)           |    -   0  |     -    1  |    0       1     | BOTH CORRECT  | verify
-  111 | FA built1 b1, s=-1 |   -1   -  |    -1    -  |    1       1     | STALL         | orch (3/3) + verify
+  111 | FA50 60 / FC40 48  |   60   1  |    48    1  |    1       1     | BOTH CORRECT  | orch (now fixed)
 
-RESULT: 7 of 8 input combos read sum = parity AND cout = majority correctly, each from its own small
-reliable single-combo run. This is a 1-bit FULL ADDER computing on OpenTTD trains, the datapath unit.
+RESULT: ALL 8 input combos read sum = parity AND cout = majority correctly, each from its own small
+reliable single-combo run. This is a 1-bit FULL ADDER computing on OpenTTD trains, the datapath unit, 8/8.
 
-Combo 111 (a=1,b=1,cin=1, the heaviest input load) is NOT a logic failure: the band BUILDS cleanly (b1,
-all bridges), but the SUM and CARRY readers do not return (raw x = -1) across 3 orchestrator retries and
-the verifier's run (the company name freezes at "FA built1 b1", a heavy-combo reader-dispatch stall under
-the maximal parked-input load). So the open item on 111 is a reader-dispatch stall, not the arithmetic.
+Combo 111 (a=1,b=1,cin=1, the heaviest input load) WAS a heavy-combo reader stall, now FIXED. Diagnosis
+(instrumented run, raw markers): the band BUILDS cleanly (b1, all bridges) and the SUM network read
+correctly, but the per-combo readout never latched because each SHARED two-input gate (g0a,g0b on the SUM
+and R1,R2,R3 on the CARRY) was trying to park a SECOND input train into a block the FIRST input already
+occupies. A block-signal NOR reads "input present" iff ANY train is in the block, so the second train is
+logically redundant AND physically unparkable (the occupied block's red signal stops it at the depot exit),
+so ParkInput burned its full ~88s 4-attempt budget on each of the five redundant double-parks. With ~5 x 88s
+of wasted parking the run never reached its readout inside the timeout, which presented as the "FA built1 b1"
+freeze. FIX (FaComboMain::ParkOcc, an occupancy guard keyed by gate row): skip the redundant second park
+when the gate row is already occupied (a fast no-op, logic identical, output still raw reader x). With the
+guard combo 111 finishes RunCase well inside the timeout and reads FA50 60 (sum x=60 > 50 => 1) and FC40 48
+(cout x=48 > 40 => 1) = sum 1, cout 1 = parity(1,1,1), majority(1,1,1). Verified on fresh sole-process runs:
+3 of 4 read sum=1 reliably (the one miss was a SEPARATE b0 bridge-build flake that broke the SUM coupling),
+and the CARRY gm reader's intermittent -1 (a SEPARATE residual dispatch miss, RunReader retry-on-miss added)
+read cout=1. The clean runs are exactly FA50 60 / FC40 48 = 1,1. The stall (the actual gap) is gone; the
+residual flakes are the already-documented bridge-build (b0) and rare dispatch-miss axes, not the 111 stall.
 
 Why single-combo beats the mega-build: the 8-combo build is 48 bridges + ~128 gates and is compounding
 -bound (common b0, dispatch misses, ~46 min/run, times out near 5/8, STUCK.md #9 UPDATE 9). One combo is
@@ -33,3 +45,7 @@ all read CORRECT here. Reproduce: python tools/run_facombo.py --all  (or --combo
 
 Note: combo 011 above read b0 (one bridge failed its check) yet still read the correct sum and cout, the
 failed bridge was not on 011's critical coupling; a clean b1 011 was also seen by the verifier.
+
+ORCHESTRATOR INDEPENDENT CONFIRMATION of combo 111 (after the ParkOcc fix): a fresh sole-process run read
+"FA50 60 c111" / "FC40 48 c111" => sum_x=60 (>50 => 1), cout_x=48 (>40 => 1), b1, CLEAN = sum 1, cout 1 =
+parity(1,1,1), majority(1,1,1). So all 8 combos are now confirmed from raw positions. FULL ADDER = 8/8.

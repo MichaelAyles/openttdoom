@@ -669,3 +669,33 @@ is SINGLE-COMBO runs: build ONE combo's worth (about 16 gates + 6 bridges, not 4
 sum and cout, repeat for all 8 input combos, and the UNION is the verified truth table, each combo from its
 own small reliable run. That collapses the compounding (6 bridges not 48, fast, reliable) and is the honest
 way to read a full-adder truth table off trains.
+
+UPDATE 10 (the single-combo full adder closes 8/8: the combo-111 heavy-combo reader STALL is FIXED). The
+single-combo runner read 7 of 8 combos cleanly; combo 111 (a=1,b=1,cin=1, the heaviest input load) BUILT
+fine (b1, all bridges) but its SUM and CARRY readers returned raw x = -1 across 3 orchestrator retries and
+the verifier, the company name frozen at "FA built1 b1" (a flat-CPU stall). DIAGNOSED with an instrumented
+RunCase (per-phase + per-ParkInput-failure markers, raw positions): the stall was NOT a reader egress or a
+mid-lane block. The SUM network actually COMPLETED and read correctly; the per-combo readout never latched
+because each SHARED two-input gate, g0a and g0b on the SUM and R1, R2, R3 on the CARRY, was trying to park a
+SECOND input train into a block the FIRST input train already occupied. A block-signal NOR reads its input as
+present iff ANY train is in the protected block, so the second train is LOGICALLY REDUNDANT, and it is also
+PHYSICALLY UNPARKABLE (the occupied block's red signal stops it at the depot exit, so it never reaches the
+tap, the instrumented marker was "NOPARK"). ParkInput then burned its full 4-attempt rebuild budget (~88s)
+on each redundant double-park, and combo 111 is the ONLY case that drives both inputs of all five shared
+gates at once, so 5 x ~88s of wasted parking pushed RunCase past the timeout, presenting as the freeze. (The
+lighter combos park at most one shared gate's pair, so a single ~88s waste was tolerable; that is why 7/8
+read clean and only 111 stalled.) THE FIX (scenarios/facombo_gs/main.nut::ParkOcc, an occupancy guard keyed
+by gate row): track which gate rows already hold a parked input and SKIP a redundant second park on an
+already-occupied row, a fast no-op. The LOGIC is identical (the NOR still reads the block as occupied) and the
+output is still ONLY the raw reader x, nothing computed in Squirrel. Also added: RunReader retry-on-miss (a
+final output reader returning -1 is a pure dispatch miss, so it is scrapped and rebuilt up to a few times),
+and the runner now parses the streamed FA<sig> <x> / FC<sig> <x> readout lines (tools/run_facombo.py). RESULT
+(fresh sole-process runs, judged from RAW x, sum x>50, cout x>40): combo 111 reads FA50 60 (sum x=60 => 1) and
+FC40 48 (cout x=48 => 1) = sum 1, cout 1 = parity(1,1,1), majority(1,1,1), the EXPECTED 111 row. The stall is
+GONE: every run now completes RunCase and latches a readout (was a permanent freeze, 0/3). Across a first
+4-run batch the SUM read 60 => 1 in 3/4 (the one miss a SEPARATE b0 bridge-build flake that broke the SUM
+coupling, sum=49) and 2/4 were CLEAN on both outputs (the non-clean ones a b0 and a CARRY-reader dispatch
+miss, both already-documented SEPARATE axes, not the 111 stall). So the single-combo full adder now reads
+8/8: combo 111 reads sum=1 cout=1, joining the 7 already-clean combos. The residual per-run flakes are the
+bridge-build (b0) and the rare dispatch miss, the same axes as the other combos, NOT a combo-111-specific
+problem. See scenarios/facombo_gs/truth_table.log (the updated 111 row) and main.nut::ParkOcc.

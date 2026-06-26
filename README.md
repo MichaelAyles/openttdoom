@@ -36,10 +36,10 @@ CPU and a hardwired raycaster FSM (and verifies them gate for gate), and the 1-b
 made genuinely good-looking. What remains is no longer a mystery, it is CONSTRUCTION at scale: the
 clock launch is reliable (10/10), single primitives are solid, and the in-game architecture is now
 COMPLETE, fixed NOR networks plus rail BRIDGES compose arbitrary logic on trains. A 1-bit HALF-ADDER, a
-3-input MAJORITY gate, and a 1-bit FULL ADDER (read 7 of 8 input combos clean, each from a small single
+3-input MAJORITY gate, and a 1-bit FULL ADDER (read 8 of 8 input combos clean, each from a small single
 -combo run) all compute on real trains, judged from raw positions. What is left is reliability at SCALE: a
 large single-run circuit is COMPOUNDING-bound (the 8-combo full-adder mega-build times out, so single-combo
-runs whose union is the truth table are the realistic proof), plus a heavy-combo reader stall, the bridge
+runs whose union is the truth table are the realistic proof), plus the bridge
 -build flake, and running it fast enough to finish a frame. The hard science is done; the hard engineering
 is the compounding.
 
@@ -78,10 +78,11 @@ In OpenTTD, on real trains (judged from raw train positions, never from script):
   so non-planar logic is now buildable, the enabler for the full-adder sum.
 - **A bridged XOR** (the half-adder sum, done reliably): ~92% logic-clean after closing the reconvergent
   -read axis (the freeze overshoot and the egress-stall undershoot, both fixed deterministically).
-- **A 1-bit FULL ADDER computes on trains**: SUM = parity, CARRY = majority, read 7 of 8 input combos clean
+- **A 1-bit FULL ADDER computes on trains**: SUM = parity, CARRY = majority, read 8 of 8 input combos clean
   per-combo (sum=parity and cout=majority from raw positions, `scenarios/facombo_gs/`). The 8-combo single
   -run mega-build is compounding-bound (48 bridges, times out); the single-combo union is the realistic
-  proof. Combo 111 (all-ones) is a heavy-combo reader stall, not a logic error.
+  proof. The combo 111 (all-ones) heavy-combo reader stall is fixed (it was a redundant second park into an
+  already-occupied shared-gate block burning the timeout, now skipped by an occupancy guard).
 - **Shown in-game**: the gorgeous raycaster frame stamped as on-map signal tiles, a rail portrait
   of a placed circuit, and clock-stepped Fibonacci (1,1,2,3,5,8,13) running on real gate lanes.
 - **OpenTTD builds from source here** (MSVC 2022), and a first speed fork gives ~3x on a bare map.
@@ -95,15 +96,17 @@ central blocker has shifted from "what to build" to "reliability at scale":
 1. **Reliability at scale, the compounding bound (the central one now).** Every primitive is built and
    reliable: the clock launch (10/10), deterministic dispatch, the BRIDGE crossing (a coupling spur carried
    over a foreign lane, crossing the planarity frontier), a bridged XOR (~92%, reconvergent-read axis
-   closed), and a 1-bit FULL ADDER that reads 7 of 8 input combos clean per-combo (sum=parity, cout=majority
+   closed), and a 1-bit FULL ADDER that reads 8 of 8 input combos clean per-combo (sum=parity, cout=majority
    from raw positions). The wall is now COMPOUNDING: a large single-run circuit multiplies many ~92 to 99
    percent per-dispatch reliabilities, so the 8-combo full-adder mega-build (48 bridges, ~128 gates) times
    out around 5 of 8 before finishing. The realistic proof is SINGLE-COMBO runs whose union is the truth
-   table, each combo a small reliable build, which is exactly how the full adder reads 7 of 8 (STUCK.md #9).
-   The remaining single-combo gaps are a heavy-combo reader stall (combo 111 builds clean but its readers do
-   not return under the maximal parked-input load) and the rare bridge-build flake (b0). Tiling to a
-   multi-bit ripple compounds the same way, so closing it means either deterministic-enough dispatch or a
-   faster substrate (blocker 4).
+   table, each combo a small reliable build, which is exactly how the full adder reads 8 of 8 (STUCK.md #9).
+   The heavy-combo reader stall (combo 111, which built clean but whose readers did not return under the
+   maximal parked-input load) is now FIXED: it was a redundant second input train parked into a block its
+   sibling already occupied, logically redundant and physically unparkable, so the park retries burned the
+   timeout; an occupancy guard skips it. The remaining single-combo flake is the rare bridge-build (b0).
+   Tiling to a multi-bit ripple compounds the same way, so closing it means either deterministic-enough
+   dispatch or a faster substrate (blocker 4).
 2. **Router DRC at scale: RESOLVED.** The full CPU (1631 cells) and the large raycaster FSM cones now
    place and route 100 percent of nets with 0 DRC (was ~410), the clock reaching every register, logic
    preserved, all 381 tests green (STUCK.md #8). So the toolchain produces a cleanly buildable full

@@ -131,6 +131,18 @@ def parse_combo_line(name: str):
     return int(m.group(1)), int(m.group(2))
 
 
+def parse_sum_line(name: str):
+    """Return the SUM raw x from a latched 'FA<sig> <x> c<abc>' company name, or None."""
+    m = re.match(r"^FA\d+ (-?\d+)( c\d\d\d)?$", name.strip())
+    return int(m.group(1)) if m else None
+
+
+def parse_cout_line(name: str):
+    """Return the CARRY raw x from a latched 'FC<sig> <x> c<abc>' company name, or None."""
+    m = re.match(r"^FC\d+ (-?\d+)( c\d\d\d)?$", name.strip())
+    return int(m.group(1)) if m else None
+
+
 def run_once(combo: int, timeout: int) -> dict:
     _kill()
     subprocess.Popen([sc1.OTTD_EXE, "-D", "-d", "script=1"], cwd=sc1.OTTD_DIR,
@@ -172,8 +184,19 @@ def run_once(combo: int, timeout: int) -> dict:
                 br = int(mb.group(1))
             pc = parse_combo_line(nm)
             if pc is not None:
+                # the combined per-combo readout 'c<abc> s<x> m<x>': both raw x at once.
                 s, m = pc
-                # got the per-combo readout; let it latch then stop
+                break
+            # the GS also STREAMS the latched 'FA<sig> <x>' (sum) and 'FC<sig> <x>' (cout) lines in
+            # turn (each under the ~31-char name limit). Capture whichever the poll catches; once BOTH
+            # raw x are seen the readout is complete. The raw x comes ONLY from the GS company name.
+            ps = parse_sum_line(nm)
+            if ps is not None:
+                s = ps
+            pm = parse_cout_line(nm)
+            if pm is not None:
+                m = pm
+            if s >= 0 and m >= 0:
                 break
             if "ERR" in nm:
                 break

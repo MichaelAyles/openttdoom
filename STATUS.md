@@ -17,8 +17,9 @@ REGISTER (`RG 11100`, logic-correct on every launched clock; the one early miss 
 since fixed, not the register losing state), a self-feeding 1-bit toggle (the machine remembers), a 1-bit
 HALF-ADDER (XOR sum + AND carry), a 3-input MAJORITY / full-adder CARRY (clean 8/8), the BRIDGE crossing
 (the planarity frontier crossed, so non-planar logic builds), a bridged XOR (~92%, the reconvergent-read
-axis closed), and a 1-bit FULL ADDER read 7/8 clean per-combo via single-combo runs (`scenarios/facombo_gs/`,
-sum=parity + cout=majority from raw positions; combo 111 is a heavy-combo reader stall, not a logic error).
+axis closed), and a 1-bit FULL ADDER read 8/8 clean per-combo via single-combo runs (`scenarios/facombo_gs/`,
+sum=parity + cout=majority from raw positions; the combo 111 heavy-combo reader stall was fixed by an
+occupancy guard, orchestrator-verified FA50 60 / FC40 48 = sum 1 cout 1).
 The remaining problems are engineering, not unknowns: the flaky clock LAUNCH is now FIXED (10/10, was the
 bound); what is left is the backend router DRC limit at ~1600 cells (STUCK.md #8, resolved in software), the
 bridge-build flake (b0), a RARE residual dispatch miss, the heavy-combo reader stall, and above all the
@@ -320,9 +321,13 @@ NOW ALSO PROVEN IN GAME (the composition and bridge frontier, all judged from ra
   - A 3-input gate: the full-adder CARRY = majority(a,b,cin) = 0,0,0,1,0,1,1,1, clean 8/8 (depth-1,
     `scenarios/fulladder_cout_gs`).
   - A 1-bit FULL ADDER (`scenarios/facombo_gs`): SUM = parity via two-stacked bridged-XOR, CARRY = majority,
-    read 7/8 clean per-combo via single-combo runs (sum=parity + cout=majority from raw positions). The
+    read 8/8 clean per-combo via single-combo runs (sum=parity + cout=majority from raw positions). The
     8-combo MEGA-build is compounding-bound (48 bridges, times out ~5/8); the single-combo union is the
-    realistic proof. Combo 111 (all-ones) is a heavy-combo reader stall, not a logic error. See STUCK.md #9.
+    realistic proof. The combo 111 (all-ones) heavy-combo reader stall is now FIXED: it was the redundant
+    second park into an already-occupied shared-gate block (the second NOR input train is logically
+    redundant and physically unparkable, so ParkInput burned its full ~88s budget x5 and blew the timeout,
+    presenting as the "FA built1 b1" freeze). The ParkOcc occupancy guard skips the redundant second park,
+    so combo 111 now reads FA50 60 / FC40 48 = sum 1, cout 1 = parity(1,1,1), majority(1,1,1). See STUCK.md #9.
 
 ### M3, toolchain spine. DONE, verified in software.
 
