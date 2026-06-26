@@ -20,7 +20,13 @@
 // ===================== SUM network columns (fasum / xorsum1 EXACT geometry) =====================
 A_BX <- 30; A_SIG <- 36; A_TA <- 37; A_TB <- 38; A_SIGT <- 39; A_CPL <- 40; A_EAST <- 48;
 B_BX <- 32; B_SIG <- 38; B_TA <- 39; B_TN <- 40; B_SIGT <- 41; B_CPL <- 42; B_EAST <- 50;
-C_BX <- 35; C_SIG <- 41; C_T2 <- 42; C_T3 <- 43; C_SIGT <- 44; C_CPL <- 45; C_TERM2 <- 46; C_EAST <- 52;
+// RECONVERGENT-FREEZE FIX (ported from xorsum1, PROVEN): g3's coupling block is the WIDE through block
+// [C_CPL..C_TERM2]=[45..50] (was the narrow [45..46]). The g3->g4 spur drops at column 45; the whole
+// block [45..50] is ONE signal block connected to that spur, so a passing g3 frozen ANYWHERE in [45..50]
+// occupies g4's input through the bridge. The old 2-tile window let the ASYNC StartStop freeze DRIFT g3
+// past C_TERM2=46 into a block DISCONNECTED from the spur (g4 read empty, wrongly passed = the c00 flake).
+// Widening absorbs the drift; nothing else uses g3's row east of 44 so it is safe (C_EAST 52->54).
+C_BX <- 35; C_SIG <- 41; C_T2 <- 42; C_T3 <- 43; C_SIGT <- 44; C_CPL <- 45; C_TERM2 <- 50; C_EAST <- 54;
 D_BX <- 37; D_SIG <- 38; D_TB <- 40; D_TN <- 41; D_SIGT <- 42; D_CPL <- 43; D_TERM2 <- 47; D_EAST <- 54;
 E_BX <- 36; E_SIG <- 37; E_TA <- 38; E_TB <- 39; E_SIGT <- 40; E_CPL <- 41; E_TERM2 <- 47; E_EAST <- 54;
 F_BX <- 42; F_SIG <- 44; F_TN <- 45; F_SIGT <- 49; F_CPL <- 50; F_EAST <- 56;   // g4 -> h at col 50
@@ -28,7 +34,11 @@ F_BX <- 42; F_SIG <- 44; F_TN <- 45; F_SIGT <- 49; F_CPL <- 50; F_EAST <- 56;   
 DY_A <- 0; DY_B <- 3; DY_C <- 6; DY_D <- 9; DY_E <- 13; DY_F <- 16;   // XOR1 rows
 
 NHa_BX <- 44; NHa_SIG <- 48; NHa_TH <- 50; NHa_SIGT <- 51; NHa_CPL <- 52; NHa_EAST <- 60;
-NHb_BX <- 44; NHb_SIG <- 48; NHb_TH <- 50; NHb_SIGT <- 51; NHb_CPL <- 53; NHb_TERM2 <- 54; NHb_EAST <- 60;
+// NHb is the XOR2 reconvergent bridged driver (NOR(h)) whose frozen reader must occupy Q's input
+// THROUGH the bridged NHb->Q spur (column NHb_CPL=53). Its coupling block [NHb_CPL..NHb_TERM2] is
+// WIDENED 54->56 (the same drift-absorption fix as g3's), so a passing NHb frozen anywhere in [53..56]
+// still occupies the column-53 spur; the freeze drift can no longer carry it past the block.
+NHb_BX <- 44; NHb_SIG <- 48; NHb_TH <- 50; NHb_SIGT <- 51; NHb_CPL <- 53; NHb_TERM2 <- 56; NHb_EAST <- 60;
 HH_BX <- 46; HH_SIG <- 49; HH_TNHA <- 52; HH_SIGT <- 55; HH_CPL <- 56; HH_EAST <- 64;
 P_BX  <- 46; P_SIG  <- 49; P_TCIN <- 51; P_THH <- 56; P_SIGT <- 57; P_CPL <- 58; P_EAST <- 66;
 Y_BX  <- 46; Y_SIG  <- 50; Y_TP <- 58; Y_TQ <- 59; Y_SIGT <- 60; Y_CPL <- 61; Y_EAST <- 68;
@@ -123,23 +133,54 @@ function FullAdderMain::BuildSpur(cplx, gya, gyb) {
     GSRail.BuildRailTrack(GSMap.GetTileIndex(cplx, lo), GSRail.RAILTRACK_SW_SE);
     GSRail.BuildRailTrack(GSMap.GetTileIndex(cplx, hi), GSRail.RAILTRACK_NW_NE);
 }
-// Ensure the E-W lane (under-rail) exists on (cplx,ly): the bridge carries the spur OVER it.
+// Ensure the E-W lane (under-rail) exists on (cplx,ly): the bridge carries the spur OVER it. The
+// under-rail is the load-bearing tile the bridge crosses; if it is missing the crossed gate lane is
+// cut, so this is confirmed RIGHT BEFORE every BuildBridge, not just once.
 function FullAdderMain::EnsureUnderRail(cplx, ly) {
-    for (local i = 0; i < 10 && !GSRail.IsRailTile(GSMap.GetTileIndex(cplx, ly)); i++) {
+    for (local i = 0; i < 12 && !GSRail.IsRailTile(GSMap.GetTileIndex(cplx, ly)); i++) {
         GSRail.BuildRailTrack(GSMap.GetTileIndex(cplx, ly), GSRail.RAILTRACK_NE_SW);
         GSController.Sleep(3);
     }
     return GSRail.IsRailTile(GSMap.GetTileIndex(cplx, ly));
 }
-// HARDENED length-3 N-S bridge in column cplx over lane row ly (STAGE 1 fix): verify IsBridgeTile on
-// BOTH ends, and DEMOLISH-AND-REBUILD the ramp tiles on repeated failure (clears a partial ramp /
-// stray rail / busy-queue drop), re-verifying the crossed under-rail each round.
+// A ramp tile (head=ly-1, tail=ly+1) MUST be EMPTY of rail before BuildBridge: GSBridge.BuildBridge
+// builds its OWN ramps there, and a stray rail tile (a leftover vertical spur piece, or a partial
+// ramp from a dropped earlier attempt) makes the build silently fail. Demolish until the tile is not
+// a rail tile (and not a bridge end). Returns true once the tile is clear.
+function FullAdderMain::ClearRamp(t) {
+    for (local i = 0; i < 12; i++) {
+        if (GSBridge.IsBridgeTile(t)) GSBridge.RemoveBridge(t);
+        else if (GSRail.IsRailTile(t)) GSTile.DemolishTile(t);
+        else return true;
+        GSController.Sleep(3);
+    }
+    return !GSRail.IsRailTile(t) && !GSBridge.IsBridgeTile(t);
+}
+// HARDENED length-3 N-S bridge in column cplx over lane row ly. The bridge build flaked intermittently
+// (b0) under three diagnosed causes, each addressed here:
+//   (1) RAMP NOT EMPTY. BuildBridge lays its own ramps on head/tail; a stray rail tile there (a
+//       leftover spur piece, or a partial ramp from a dropped attempt) silently fails the build. FIX:
+//       ClearRamp confirms BOTH ramp tiles empty IMMEDIATELY before each BuildBridge.
+//   (2) UNDER-RAIL MISSING. The crossed E-W lane on ly is the load-bearing under-tile; a demolish in a
+//       prior round, or never having been laid, leaves it absent. FIX: EnsureUnderRail confirmed RIGHT
+//       BEFORE each BuildBridge (the lane is cut otherwise, and the crossing reads empty).
+//   (3) TRANSIENT QUEUE DROP. Right after the heavy per-copy build the command queue is saturated and a
+//       single BuildBridge is dropped. FIX: retry with a settle, BOTH-ENDS IsBridgeTile verify, and a
+//       FULL COLUMN TEARDOWN between rounds (RemoveBridge both ends, demolish head + under-tile + tail,
+//       rebuild the under-rail) so a partial/failed state is fully cleared before the next round, with a
+//       longer settle to drain the queue.
 function FullAdderMain::BuildOneBridge(cplx, ly) {
     local head = GSMap.GetTileIndex(cplx, ly - 1);
     local tail = GSMap.GetTileIndex(cplx, ly + 1);
-    this.EnsureUnderRail(cplx, ly);
+    local under = GSMap.GetTileIndex(cplx, ly);
     local len = GSMap.DistanceManhattan(head, tail) + 1;
-    for (local round = 0; round < 4; round++) {
+    for (local round = 0; round < 7; round++) {
+        if (GSBridge.IsBridgeTile(head) && GSBridge.IsBridgeTile(tail)) return true;
+        // pre-conditions, confirmed immediately before the build attempts this round:
+        this.ClearRamp(head);            // ramp tiles EMPTY (cause 1)
+        this.ClearRamp(tail);
+        this.EnsureUnderRail(cplx, ly);  // under-rail PRESENT (cause 2)
+        GSController.Sleep(3);           // drain the queue before the build (cause 3)
         for (local i = 0; i < 8; i++) {
             if (GSBridge.IsBridgeTile(head) && GSBridge.IsBridgeTile(tail)) return true;
             local types = GSBridgeList_Length(len);
@@ -147,14 +188,17 @@ function FullAdderMain::BuildOneBridge(cplx, ly) {
             GSController.Sleep(4);
         }
         if (GSBridge.IsBridgeTile(head) && GSBridge.IsBridgeTile(tail)) return true;
+        // FULL COLUMN TEARDOWN: clear any partial bridge + the ramps + the under-tile, rebuild the
+        // under-rail, longer settle, so the next round starts from a clean column (cause 3).
         if (GSBridge.IsBridgeTile(head)) GSBridge.RemoveBridge(head);
-        else if (GSBridge.IsBridgeTile(tail)) GSBridge.RemoveBridge(tail);
+        if (GSBridge.IsBridgeTile(tail)) GSBridge.RemoveBridge(tail);
         GSController.Sleep(2);
         GSTile.DemolishTile(head);
+        GSTile.DemolishTile(under);
         GSTile.DemolishTile(tail);
-        GSController.Sleep(3);
+        GSController.Sleep(6);
         this.EnsureUnderRail(cplx, ly);
-        GSController.Sleep(3);
+        GSController.Sleep(6);
     }
     return GSBridge.IsBridgeTile(head) && GSBridge.IsBridgeTile(tail);
 }
@@ -296,6 +340,76 @@ function FullAdderMain::RunReader(wd, ed) {
     return fx;
 }
 
+// THE RECONVERGENT FREEZE (deterministic coupling-tile landing), PORTED VERBATIM from xorsum1 (PROVEN
+// ~92% logic-clean). A reconvergent DRIVER whose frozen reader must occupy the consumer's input block
+// THROUGH a BRIDGED spur (g3->g4 over column C_CPL, NHb->Q over column NHb_CPL) cannot use the plain
+// RunFreeze: an ASYNC StartStop fired at fx>=cpl lets the train DRIFT, and on a narrow coupling block
+// the drift can carry it PAST the block into a region DISCONNECTED from the spur, so the consumer reads
+// empty and wrongly passes (the c00-style flake). Two changes fix it deterministically:
+//   (i) the coupling block is WIDE ([cpl..term2], geometry widened above), so any rest there occupies
+//       the spur; and
+//   (ii) this freeze CONFIRMS the landing: a PASSING driver is pinned at/past cpl and strictly WEST of
+//        term2 (or diverted off-row into the spur); a genuinely HELD driver rests at sigx-1 and is
+//        returned as-is. The EGRESS-UNDERSHOOT STALL (a reader stalled mid-lane WEST of its held
+//        position, never reaching the coupling block, indistinguishable from a held output-0) is
+//        detected and the reader is SCRAPPED + rebuilt (the ParkInput rebuild-on-stuck model), so a
+//        silent stall can no longer be mistaken for a held output-0.
+// Returns the driver's final raw x (held == sigx-1 => output 0; in [cpl..term2) or off-row => output 1,
+// delivering into the consumer through the bridge).
+function FullAdderMain::RunG3Freeze(wd, ed, gy, sigx, sigtx, cpl, term2) {
+    local fx = -1;
+    for (local attempt = 0; attempt < 4; attempt++) {
+        local v = this.BuildReader(wd, ed, GSMap.GetTileX(wd), GSMap.GetTileY(wd));
+        if (v == null) { GSController.Sleep(8); continue; }
+        local res = this.RunG3FreezeOnce(v, gy, sigx, sigtx, cpl, term2);
+        fx = res.fx;
+        if (res.stalled) { this.Scrap(v, wd); GSController.Sleep(8); continue; }
+        return fx;
+    }
+    return fx;
+}
+// One reconvergent freeze attempt on an already-dispatched reader v. Returns { fx, stalled }.
+// stalled == true means the reader rests ON-ROW STRICTLY WEST of its held position (cx<sigx-1) and is
+// not advancing: an egress-undershoot stall, NOT a genuine held output-0, so the caller rebuilds.
+function FullAdderMain::RunG3FreezeOnce(v, gy, sigx, sigtx, cpl, term2) {
+    local fx = -1;
+    for (local s = 0; s < 200; s++) {
+        GSController.Sleep(3);
+        fx = this.Tx(v);
+        local ty = this.Ty(v);
+        if (fx < 0) continue;
+        local diverted = (fx > sigx && ty != gy);
+        if ((fx >= cpl) || diverted) { GSVehicle.StartStopVehicle(v); break; }
+        if (fx > sigx && fx < cpl && GSVehicle.IsStoppedInDepot(v)) GSVehicle.StartStopVehicle(v);
+    }
+    // PIN-AND-VERIFY: drive a passing driver to rest strictly inside the coupling block [cpl..term2-1]
+    // so its occupancy is on the spur; a held driver rests at sigx-1.
+    for (local p = 0; p < 24; p++) {
+        if (!GSVehicle.IsValidVehicle(v)) break;
+        local cx = this.Tx(v); local cy = this.Ty(v);
+        if (cx < 0) { GSController.Sleep(4); continue; }
+        local offrow = (cy != gy);
+        local held = (cx == sigx - 1 && cy == gy);
+        if (held) break;
+        if (offrow) break;
+        if (cx >= cpl && cx < term2) break;
+        if (cx < cpl) {
+            if (GSVehicle.GetCurrentSpeed(v) == 0) GSVehicle.StartStopVehicle(v);
+            GSController.Sleep(4);
+            if (GSVehicle.IsValidVehicle(v) && this.Tx(v) >= cpl) GSVehicle.StartStopVehicle(v);
+        }
+        GSController.Sleep(4);
+    }
+    for (local s = 0; s < 12; s++) {
+        GSController.Sleep(4);
+        if (!GSVehicle.IsValidVehicle(v) || GSVehicle.GetCurrentSpeed(v) == 0) break;
+    }
+    fx = this.Tx(v);
+    local cy = this.Ty(v);
+    local stalled = (fx >= 0 && cy == gy && fx < sigx - 1);
+    return { fx = fx, stalled = stalled };
+}
+
 // Build one independent FULL-ADDER copy at combo base row gy: the SUM network (rows gy+0..gy+43)
 // and the CARRY network (rows gy+COUT+0..gy+COUT+9), each fully independent.
 function FullAdderMain::BuildCopy(gy) {
@@ -375,12 +489,18 @@ function FullAdderMain::RunCase(c, a, b, cin) {
     this.RunFreeze(c.le.wd, c.le.ed, c.ye, E_SIG, E_CPL);  GSController.Sleep(6);
     this.RunFreeze(c.lb.wd, c.lb.ed, c.yb, B_SIG, B_CPL);  GSController.Sleep(6);
     this.RunFreeze(c.ld.wd, c.ld.ed, c.yd, D_SIG, D_CPL);  GSController.Sleep(6);
-    this.RunFreeze(c.lc.wd, c.lc.ed, c.yc, C_SIG, C_CPL);  GSController.Sleep(6);
+    // g3 is the XOR1 reconvergence (NOR(n2,n3)) whose frozen reader must occupy g4's input THROUGH the
+    // bridged g3->g4 spur (column C_CPL=45). Use the PROVEN RunG3Freeze (widened block [45..50] + pin +
+    // egress-stall rebuild), not plain RunFreeze, so the coupling delivers reliably (the xorsum1 fix).
+    this.RunG3Freeze(c.lc.wd, c.lc.ed, c.yc, C_SIG, C_SIGT, C_CPL, C_TERM2);  GSController.Sleep(6);
     local hbit = this.RunFreeze(c.lf.wd, c.lf.ed, c.yf, F_SIG, F_CPL);
     GSController.Sleep(20);
     // SUM XOR2 -> Y = s
     this.RunFreeze(c.lnha.wd, c.lnha.ed, c.ynha, NHa_SIG, NHa_CPL);  GSController.Sleep(6);
-    this.RunFreeze(c.lnhb.wd, c.lnhb.ed, c.ynhb, NHb_SIG, NHb_CPL);  GSController.Sleep(6);
+    // NHb is the XOR2 reconvergent bridged driver (NOR(h)) whose frozen reader must occupy Q's input
+    // THROUGH the bridged NHb->Q spur (column 53). Use RunG3Freeze (widened block [53..56] + pin +
+    // egress-stall rebuild), the same proven fix as g3, so the bridged coupling delivers reliably.
+    this.RunG3Freeze(c.lnhb.wd, c.lnhb.ed, c.ynhb, NHb_SIG, NHb_SIGT, NHb_CPL, NHb_TERM2);  GSController.Sleep(6);
     this.RunFreeze(c.lhh.wd, c.lhh.ed, c.yhh, HH_SIG, HH_CPL);  GSController.Sleep(6);
     this.RunFreeze(c.lnc.wd, c.lnc.ed, c.ync, NC_SIG, NC_CPL);  GSController.Sleep(6);
     this.RunFreeze(c.lp.wd, c.lp.ed, c.yp, P_SIG, P_CPL);  GSController.Sleep(6);

@@ -174,23 +174,69 @@ function XorSum1Main::BuildBridgedSpur(cplx, gya, gyb, ly1, ly2) {
     return ok;
 }
 
-// One length-3 N-S bridge in column cplx over lane row ly. Ensures the under-tile carries the lane
-// E-W rail first, then builds the bridge (head=ly-1, tail=ly+1), verify-and-retry.
-function XorSum1Main::BuildOneBridge(cplx, ly) {
-    for (local i = 0; i < 8 && !GSRail.IsRailTile(GSMap.GetTileIndex(cplx, ly)); i++) {
+// Ensure the E-W lane (under-rail) exists on (cplx,ly): the bridge carries the spur OVER it. The
+// under-rail is the load-bearing tile the bridge crosses; if it is missing the crossed gate lane is
+// cut, so this is confirmed RIGHT BEFORE every BuildBridge.
+function XorSum1Main::EnsureUnderRail(cplx, ly) {
+    for (local i = 0; i < 12 && !GSRail.IsRailTile(GSMap.GetTileIndex(cplx, ly)); i++) {
         GSRail.BuildRailTrack(GSMap.GetTileIndex(cplx, ly), GSRail.RAILTRACK_NE_SW);
         GSController.Sleep(3);
     }
+    return GSRail.IsRailTile(GSMap.GetTileIndex(cplx, ly));
+}
+// A ramp tile (head=ly-1, tail=ly+1) MUST be EMPTY of rail before BuildBridge: GSBridge.BuildBridge
+// builds its OWN ramps there, and a stray rail tile (a leftover vertical spur piece, or a partial ramp
+// from a dropped earlier attempt) makes the build silently fail. Demolish until the tile is clear.
+function XorSum1Main::ClearRamp(t) {
+    for (local i = 0; i < 12; i++) {
+        if (GSBridge.IsBridgeTile(t)) GSBridge.RemoveBridge(t);
+        else if (GSRail.IsRailTile(t)) GSTile.DemolishTile(t);
+        else return true;
+        GSController.Sleep(3);
+    }
+    return !GSRail.IsRailTile(t) && !GSBridge.IsBridgeTile(t);
+}
+// HARDENED length-3 N-S bridge in column cplx over lane row ly. The bridge build flaked intermittently
+// (b0); three diagnosed causes, each addressed (same fix folded into fulladder_gs):
+//   (1) RAMP NOT EMPTY. BuildBridge lays its own ramps on head/tail; a stray rail tile there silently
+//       fails the build. FIX: ClearRamp confirms BOTH ramp tiles empty IMMEDIATELY before each build.
+//   (2) UNDER-RAIL MISSING. The crossed E-W lane on ly is the load-bearing under-tile; a demolish in a
+//       prior round leaves it absent. FIX: EnsureUnderRail confirmed RIGHT BEFORE each build.
+//   (3) TRANSIENT QUEUE DROP. The saturated post-build command queue drops a single BuildBridge. FIX:
+//       retry with a settle, BOTH-ENDS IsBridgeTile verify (the old code checked only head), and a FULL
+//       COLUMN TEARDOWN between rounds (RemoveBridge both ends, demolish head + under-tile + tail,
+//       rebuild the under-rail) so a partial/failed state is fully cleared, with a longer settle.
+function XorSum1Main::BuildOneBridge(cplx, ly) {
     local head = GSMap.GetTileIndex(cplx, ly - 1);
     local tail = GSMap.GetTileIndex(cplx, ly + 1);
+    local under = GSMap.GetTileIndex(cplx, ly);
     local len = GSMap.DistanceManhattan(head, tail) + 1;
-    for (local i = 0; i < 12; i++) {
-        if (GSBridge.IsBridgeTile(head)) break;
-        local types = GSBridgeList_Length(len);
-        if (!types.IsEmpty()) GSBridge.BuildBridge(GSVehicle.VT_RAIL, types.Begin(), head, tail);
-        GSController.Sleep(4);
+    for (local round = 0; round < 7; round++) {
+        if (GSBridge.IsBridgeTile(head) && GSBridge.IsBridgeTile(tail)) return true;
+        this.ClearRamp(head);            // ramp tiles EMPTY (cause 1)
+        this.ClearRamp(tail);
+        this.EnsureUnderRail(cplx, ly);  // under-rail PRESENT (cause 2)
+        GSController.Sleep(3);           // drain the queue before the build (cause 3)
+        for (local i = 0; i < 8; i++) {
+            if (GSBridge.IsBridgeTile(head) && GSBridge.IsBridgeTile(tail)) return true;
+            local types = GSBridgeList_Length(len);
+            if (!types.IsEmpty()) GSBridge.BuildBridge(GSVehicle.VT_RAIL, types.Begin(), head, tail);
+            GSController.Sleep(4);
+        }
+        if (GSBridge.IsBridgeTile(head) && GSBridge.IsBridgeTile(tail)) return true;
+        // FULL COLUMN TEARDOWN: clear any partial bridge + ramps + under-tile, rebuild the under-rail,
+        // longer settle, so the next round starts from a clean column (cause 3).
+        if (GSBridge.IsBridgeTile(head)) GSBridge.RemoveBridge(head);
+        if (GSBridge.IsBridgeTile(tail)) GSBridge.RemoveBridge(tail);
+        GSController.Sleep(2);
+        GSTile.DemolishTile(head);
+        GSTile.DemolishTile(under);
+        GSTile.DemolishTile(tail);
+        GSController.Sleep(6);
+        this.EnsureUnderRail(cplx, ly);
+        GSController.Sleep(6);
     }
-    return GSBridge.IsBridgeTile(head);
+    return GSBridge.IsBridgeTile(head) && GSBridge.IsBridgeTile(tail);
 }
 
 // ---- SHARED EGRESS HARDENING (the proven main_clocked.nut NudgeEgress pattern) ----
