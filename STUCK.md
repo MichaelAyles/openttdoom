@@ -654,3 +654,18 @@ CORRECTION to UPDATE 6: the deterministic-dispatch fix took x=-1 misses from com
 5 shows ~1 in 20+ dispatches still misses). So the bridged XOR is ~92% logic-clean; the remaining limiters
 are the BRIDGE-BUILD reliability (b0, the most impactful for the full adder's 48 bridges, even 1 of xorsum1's
 2 bridges flaked here) and the rare residual dispatch miss. The reconvergent freeze itself is solved.
+
+UPDATE 9 (the 8-combo full-adder MEGA-run is COMPOUNDING-BOUND; the realistic clean proof is SINGLE-COMBO
+runs). Orchestrator's own fresh sole-process fulladder run (all fixes consolidated: deterministic dispatch,
+reconvergent read ~92%, bridge-build pre-check hardening) STILL did not close: build b0 (a bridge failed its
+check even with the hardening, because 48 bridges compound), then c000 s49/m39 BOTH correct, c001 sum wrong
+(b0 broke the cin coupling), c010 s60/m39 BOTH correct, c011 sum wrong + cout x=-1 miss, c100 both x=-1, then
+the run TIMED OUT at combo 5 of 8 (~11 min/combo, the heavy combos are slow). So the 8-combo mega-build is
+bounded by COMPOUNDING: 48 bridges make b0 common, per-combo dispatch misses recur, and ~46+ min/run means
+it does not even finish 8 combos. The combos that DO complete compute correctly (c000, c010 both-correct), so
+the architecture is sound, the single-RUN reliability is the compounding wall. CONCLUSION: a single clean 8/8
+mega-run is the wrong target, it fights an exponential in circuit size. The realistic clean full-adder proof
+is SINGLE-COMBO runs: build ONE combo's worth (about 16 gates + 6 bridges, not 48) per fresh server, read its
+sum and cout, repeat for all 8 input combos, and the UNION is the verified truth table, each combo from its
+own small reliable run. That collapses the compounding (6 bridges not 48, fast, reliable) and is the honest
+way to read a full-adder truth table off trains.
