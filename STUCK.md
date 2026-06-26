@@ -638,3 +638,19 @@ the reconvergent-OVERSHOOT axis is FIXED; a reconvergent reader-EGRESS-STALL axi
 is the SAME rebuild-on-stall budget ParkInput has (scrap and re-dispatch g3 if it is frozen behind its own
 reader signal when it should be deciding), not yet built. Separate unchanged limiters: the 48-bridge build
 reliability (b0) at full-adder scale, and heavy-combo speed.
+
+UPDATE 8 (the reconvergent-EGRESS-STALL axis is now CLOSED; bridged XOR ~92%; the residual is the rare
+reappearance of the dispatch-miss and bridge-build axes). The g3 reader-egress UNDERSHOOT stall (UPDATE 7's
+residual) was fixed in scenarios/xorsum1_gs/main.nut::RunG3Freeze with the ParkInput rebuild-on-stuck model:
+a g3 reader stalled mid-lane WEST of its held position (cx < C_SIG-1, the x=36 case) is no longer accepted
+as a held output-0, it is SCRAPPED and re-dispatched until it either reaches the coupling block (passes) or
+rests genuinely held at C_SIG-1. RESULT (recovered from disk after the build agent hit the structured-output
+wrap-up failure, then orchestrator-verified): the build agent's batch was 8/8 logic-clean, and the
+orchestrator's own 5 fresh sole-process runs were 4/5, with c00 g3 landing EXACTLY at x=45 in ALL 13 runs
+(the x=36 stall is gone). Combined ~12/13 (~92%) reading 0,1,1,0. The reconvergent-READ axis (overshoot in
+UPDATE 7, undershoot here) is now CLOSED. The one orchestrator miss (run 5) was NOT the reconvergent read,
+it was a c01 reader x=-1 DISPATCH miss plus a b0 BRIDGE-build flake, two SEPARATE already-known axes. HONEST
+CORRECTION to UPDATE 6: the deterministic-dispatch fix took x=-1 misses from common to RARE, not to NIL (run
+5 shows ~1 in 20+ dispatches still misses). So the bridged XOR is ~92% logic-clean; the remaining limiters
+are the BRIDGE-BUILD reliability (b0, the most impactful for the full adder's 48 bridges, even 1 of xorsum1's
+2 bridges flaked here) and the rare residual dispatch miss. The reconvergent freeze itself is solved.

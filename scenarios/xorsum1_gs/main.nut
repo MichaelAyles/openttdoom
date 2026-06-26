@@ -347,11 +347,51 @@ function XorSum1Main::RunFreeze(wd, ed, gy, sigx, cpl) {
 //        STRICTLY WEST of C_TERM2 (re-nudged off the ambiguous C_SIGT tile, stopped before it can
 //        overrun C_TERM2), and the rest is verified inside [C_CPL..C_TERM2-1] (or diverted into the
 //        spur, ty!=gy); a genuinely HELD g3 (input occupied) rests at C_SIG-1 and is returned as-is.
-// Returns g3's final raw x (held <= C_SIG-1 => output 0; in [C_CPL..C_TERM2) or off-row => output 1,
-// delivering into g4 through the bridge).
+//
+// EGRESS-UNDERSHOOT STALL FIX (the residual ~1/5 c00 flake, this run). NudgeEgress confirms the
+// reader left its WEST depot tile, but on c00 the reader sometimes STALLED mid-lane a couple tiles
+// east of the depot, at cx ~= 36 (WEST of even its held position C_SIG-1=40 and BEHIND its reader
+// signal C_SIG=41). It never reached the coupling block, so g3 never occupied g4's input, and g4
+// wrongly PASSED (read 56 where it should be held 43). The old code's heldEarly test (cx <= sigx-1)
+// classified that x=36 stall as a genuine held output-0, INDISTINGUISHABLE from a true held g3,
+// silently corrupting c00. THE FIX (the ParkInput rebuild-on-stuck model applied to g3's reader
+// egress): a true HELD g3 rests AT its reader signal (cx == sigx-1 == 40, having actually traversed
+// the lane and been stopped by the occupied input block); a STALL rests STRICTLY WEST of that
+// (cx < sigx-1, e.g. 36) because it never launched down the lane. When the reader is on-row, west of
+// the held position, and NOT advancing after the egress settle, do NOT accept it as held: SCRAP and
+// REBUILD the reader (same scrap + re-dispatch budget ParkInput uses) so g3 gets another chance to
+// traverse its lane and either PASS (reach the coupling block) or be genuinely HELD at sigx-1.
+//
+// Returns g3's final raw x (held == C_SIG-1 => output 0; in [C_CPL..C_TERM2) or off-row => output 1,
+// delivering into g4 through the bridge). The deterministic dispatch is preserved: g4 is dispatched
+// only after g3 is confirmed either delivered-in-block (or in the spur) or genuinely held at sigx-1.
 function XorSum1Main::RunG3Freeze(wd, ed, gy, sigx, sigtx, cpl, term2) {
-    local v = this.BuildReader(wd, ed, GSMap.GetTileX(wd), GSMap.GetTileY(wd));
-    if (v == null) return -1;
+    // Rebuild-on-stall budget: each attempt builds a fresh reader, traverses, and either delivers
+    // into the coupling block, settles genuinely held at sigx-1, or is detected stalled behind the
+    // reader signal and scrapped for another attempt. Only a held-at-sigx-1 or a delivered landing
+    // ends the loop; a stall consumes one attempt and rebuilds.
+    local fx = -1;
+    for (local attempt = 0; attempt < 4; attempt++) {
+        local v = this.BuildReader(wd, ed, GSMap.GetTileX(wd), GSMap.GetTileY(wd));
+        if (v == null) { GSController.Sleep(8); continue; }
+        local res = this.RunG3FreezeOnce(v, gy, sigx, sigtx, cpl, term2);
+        fx = res.fx;
+        if (res.stalled) {
+            // never launched down the lane (rest west of the held position, behind the reader
+            // signal); scrap and rebuild so this is not mistaken for a genuine held output-0.
+            this.Scrap(v, wd);
+            GSController.Sleep(8);
+            continue;
+        }
+        return fx;   // delivered into the coupling block / spur, or genuinely held at sigx-1.
+    }
+    return fx;       // budget exhausted: return whatever the last attempt observed (judged externally).
+}
+
+// One g3 freeze attempt on an already-dispatched reader v. Returns { fx = final raw x, stalled = bool }.
+// stalled == true means the reader came to rest ON-ROW STRICTLY WEST of its held position (cx<sigx-1)
+// and is not advancing: an egress-undershoot stall, NOT a genuine held output-0, so the caller rebuilds.
+function XorSum1Main::RunG3FreezeOnce(v, gy, sigx, sigtx, cpl, term2) {
     local fx = -1;
     for (local s = 0; s < 200; s++) {
         GSController.Sleep(3);
@@ -377,11 +417,13 @@ function XorSum1Main::RunG3Freeze(wd, ed, gy, sigx, sigtx, cpl, term2) {
         local cx = this.Tx(v); local cy = this.Ty(v);
         if (cx < 0) { GSController.Sleep(4); continue; }
         local offrow = (cy != gy);                         // diverted into the spur: already coupled
-        local heldEarly = (cx <= sigx - 1 && cy == gy);    // resting at the reader signal => output 0
-        if (heldEarly) break;                              // genuine held, leave it
+        local held = (cx == sigx - 1 && cy == gy);         // resting AT the reader signal => genuine held
+        if (held) break;                                   // genuine held, leave it
         if (offrow) break;                                 // in the spur, occupies g4's input, done
         if (cx >= cpl && cx < term2) break;                // in the coupling block, occupies the spur
-        // on-row but short of cpl (at sigtx) or at/over term2: nudge it forward one step, then re-settle.
+        // on-row but short of cpl: at sigtx (just past the reader signal, legitimately advancing) OR
+        // stalled WEST of the held position (an egress undershoot). Either way nudge it forward one
+        // step toward the coupling block; if it will not advance it is detected as a stall below.
         if (cx < cpl) {
             if (GSVehicle.GetCurrentSpeed(v) == 0) GSVehicle.StartStopVehicle(v);
             GSController.Sleep(4);
@@ -389,13 +431,18 @@ function XorSum1Main::RunG3Freeze(wd, ed, gy, sigx, sigtx, cpl, term2) {
         }
         GSController.Sleep(4);
     }
-    // let the freeze settle, then report the final raw x (judged externally).
+    // let the freeze settle, then read the final raw x.
     for (local s = 0; s < 12; s++) {
         GSController.Sleep(4);
         if (!GSVehicle.IsValidVehicle(v) || GSVehicle.GetCurrentSpeed(v) == 0) break;
     }
     fx = this.Tx(v);
-    return fx;
+    local cy = this.Ty(v);
+    // STALL DETECTION: on-row, at rest, STRICTLY WEST of the held position (fx < sigx-1). A genuine
+    // held g3 rests AT sigx-1; a delivered g3 rests at/after cpl or off-row. Anything resting west of
+    // sigx-1 on-row never launched down the lane (the x=36 undershoot), so flag it for a rebuild.
+    local stalled = (fx >= 0 && cy == gy && fx < sigx - 1);
+    return { fx = fx, stalled = stalled };
 }
 
 // Run the final gate reader (no freeze); record where it rests. Returns final x. Egress confirmed
@@ -464,9 +511,12 @@ function XorSum1Main::RunCase(c, a, b) {
     // inside the WIDE coupling block [C_CPL..C_TERM2) (or diverted into the spur), so its occupancy is
     // on the g3->g4 spur and delivered through the bridge into g4's input. A held g3 rests at C_SIG-1.
     // RunG3Freeze already PINS g3 inside the coupling block (or the spur) and verifies the landing
-    // before returning, so by the time r3 is set g3's occupancy is delivered into g4's input through
-    // the bridge (when g3 passed) or g3 rests held at C_SIG-1 (when it is held). No extra confirm is
-    // needed here; we only let the occupancy settle before dispatching g4.
+    // before returning, AND rebuilds the reader on an egress-undershoot stall (a reader stalled WEST of
+    // the held position C_SIG-1, behind its reader signal, is scrapped and re-dispatched so it is never
+    // mistaken for a genuine held output-0). So by the time r3 is set g3's occupancy is delivered into
+    // g4's input through the bridge (when g3 passed) or g3 rests genuinely held at C_SIG-1 (when held);
+    // a silent stall can no longer corrupt c00. No extra confirm is needed here; we only let the
+    // occupancy settle before dispatching g4.
     local r3 = this.RunG3Freeze(c.lc.wd, c.lc.ed, c.yc, C_SIG, C_SIGT, C_CPL, C_TERM2);
     GSController.Sleep(40);   // settle: let g3's frozen occupancy settle in g4's block
     local r4 = this.RunReader(c.lf.wd, c.lf.ed);
