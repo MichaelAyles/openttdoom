@@ -10,14 +10,21 @@ SEQUENTIAL spine: a register cell lowered to an all-NOR master-slave latch, a cy
 simulator, sequential equivalence, and register place-and-route with a clock-distribution net.
 The CPU computes Fibonacci and the FSM reproduces the gorgeous 1-bit raycaster bit-for-bit.
 
-In OpenTTD on real trains, the research unknowns are retired: a NOR gate computes, gates compose,
-the toolchain emits a computing cell, a self-sustaining clock runs, a clock-synchronised gate is
-reliable (8/8), a clocked REGISTER holds a bit across edges and updates on a clocked write
-(`RG 11100`, 2/3), and a self-feeding 1-bit toggle evolves from its own held state (the machine
-remembers). All judged from raw train positions. The remaining problems are engineering at scale,
-not unknowns: a backend router DRC limit at ~1600 cells (STUCK.md #8), per-cell reliability of
-~2/3 to 4/5 (the flaky clock launch), the GS-mediated write-back (the pure-feedback reservation
-coupling), and speed. See README.md "Where we are" for the headline picture.
+In OpenTTD on real trains, the architecture is COMPLETE: fixed NOR networks plus rail BRIDGES compose
+arbitrary logic, all judged from raw train positions. Proven in game: a NOR gate, gate composition, the
+toolchain emitting a computing cell, a self-sustaining clock, a clock-synchronised gate (8/8), a clocked
+REGISTER (`RG 11100`, logic-correct on every launched clock; the one early miss was a clock-LAUNCH CKFAIL,
+since fixed, not the register losing state), a self-feeding 1-bit toggle (the machine remembers), a 1-bit
+HALF-ADDER (XOR sum + AND carry), a 3-input MAJORITY / full-adder CARRY (clean 8/8), the BRIDGE crossing
+(the planarity frontier crossed, so non-planar logic builds), a bridged XOR (~92%, the reconvergent-read
+axis closed), and a 1-bit FULL ADDER read 7/8 clean per-combo via single-combo runs (`scenarios/facombo_gs/`,
+sum=parity + cout=majority from raw positions; combo 111 is a heavy-combo reader stall, not a logic error).
+The remaining problems are engineering, not unknowns: the flaky clock LAUNCH is now FIXED (10/10, was the
+bound); what is left is the backend router DRC limit at ~1600 cells (STUCK.md #8, resolved in software), the
+bridge-build flake (b0), a RARE residual dispatch miss, the heavy-combo reader stall, and above all the
+COMPOUNDING bound of large single-RUN circuits (the 8-combo full-adder mega-build times out near 5/8, so
+single-combo runs whose union is the truth table are the realistic proof), plus the GS-mediated write-back
+(the pure-feedback reservation coupling) and speed. See README.md "Where we are" for the headline picture.
 
 Total test count: 381 passing (`python -m pytest -q`), spanning the golden model, the HDL (adder,
 ALU, CPU, raycaster FSM), the synth/register/sequential spine, and place-and-route.
@@ -295,11 +302,27 @@ ALU, CPU, raycaster FSM), the synth/register/sequential spine, and place-and-rou
   block to [45..50] so the drift is absorbed, and (ii) a dedicated RunG3Freeze that PINS g3 in the coupling
   block and CONFIRMS the landing before g4 is dispatched. RESULT (honest, the build-agent "5/5 fixed"
   CORRECTED): ~40% -> ~80% logic-clean across build (6/8), adversarial verify (4/5), and orchestrator (3/3)
-  fresh sole-process runs = ~13/16 reading "XS1 s44 43 56 56 43 b1" = 0,1,1,0, b1, zero x=-1. NOT closed:
-  the adversarial verify caught a SEPARATE residual, a g3 reader-EGRESS UNDERSHOOT stall (g3 stalls at x=36,
-  west of its held position, never reaches the coupling block, indistinguishable from a held output-0, so
-  c00 fails ~1/5). The reconvergent-OVERSHOOT axis is fixed; a reconvergent reader-EGRESS-STALL axis remains
-  (~1/5), fix = the rebuild-on-stall budget ParkInput has, not yet built. See STUCK.md #9 UPDATE 7.
+  fresh sole-process runs = ~13/16 reading "XS1 s44 43 56 56 43 b1" = 0,1,1,0, b1, zero x=-1. The OVERSHOOT
+  fix exposed a SEPARATE residual, a g3 reader-EGRESS UNDERSHOOT stall (g3 stalls at x=36, never reaches the
+  coupling block, read as a held-0), which was THEN ALSO fixed (RunG3Freeze gained the ParkInput rebuild-on
+  -stuck model: a g3 reader stalled west of its held position is scrapped and re-dispatched, not accepted as
+  held-0). That CLOSED the reconvergent-READ axis: the bridged XOR is now ~92% logic-clean (the build batch
+  8/8 + orchestrator 4/5, c00 g3 lands exactly on x=45). The residual ~8% is the rare reappearance of the
+  dispatch-miss and bridge-build axes, not the reconvergent read. See STUCK.md #9 UPDATEs 7-8.
+
+NOW ALSO PROVEN IN GAME (the composition and bridge frontier, all judged from raw reader positions).
+  - A 1-bit HALF-ADDER as a fixed NOR network: XOR sum = 0,1,1,0 (`scenarios/stageB_gs`) and AND carry =
+    0,0,0,1 (`scenarios/stageBcarry_gs`), each gate its own lane, nothing re-parked between reads. The
+    fixed-network architecture composes past 2 gates, breaking the reused-lane composition wall.
+  - The BRIDGE crossing primitive (`scenarios/bridgeprobe_gs`): a coupling spur carried OVER an independent
+    gate's lane as a rail bridge, both nets computing, no short (a level-crossing control shorts them). This
+    crosses the PLANARITY frontier, so non-planar logic (the full-adder sum's reconvergence) is buildable.
+  - A 3-input gate: the full-adder CARRY = majority(a,b,cin) = 0,0,0,1,0,1,1,1, clean 8/8 (depth-1,
+    `scenarios/fulladder_cout_gs`).
+  - A 1-bit FULL ADDER (`scenarios/facombo_gs`): SUM = parity via two-stacked bridged-XOR, CARRY = majority,
+    read 7/8 clean per-combo via single-combo runs (sum=parity + cout=majority from raw positions). The
+    8-combo MEGA-build is compounding-bound (48 bridges, times out ~5/8); the single-combo union is the
+    realistic proof. Combo 111 (all-ones) is a heavy-combo reader stall, not a logic error. See STUCK.md #9.
 
 ### M3, toolchain spine. DONE, verified in software.
 

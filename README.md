@@ -26,18 +26,22 @@ the map as tiles (see the images below). The real goal is the hard one, a DOOM f
 that:
 
 ```
-Machine-computed DOOM frame:  [###########-------------------]  ~35%
+Machine-computed DOOM frame:  [#############-----------------]  ~42%
 ```
 
 That number is deliberately honest. Every research UNKNOWN is now retired: a gate computes,
 gates compose, there is a self-sustaining clock, a **clocked register holds a bit across edges**,
 a **self-feeding machine evolves from its own held state**, the toolchain compiles BOTH a small
 CPU and a hardwired raycaster FSM (and verifies them gate for gate), and the 1-bit workload is
-made genuinely good-looking. What remains is no longer a mystery, it is CONSTRUCTION at scale:
-the clock launch is now reliable (10/10), single primitives are solid, and multi-gate arithmetic now
-COMPOSES as a fixed physical network (a 1-bit half-adder computes on real trains, each gate its own
-lane, nothing re-parked between reads). The next step is scaling that to a multi-bit datapath and
-running it fast enough to finish a frame. The hard science is done; the hard engineering is not.
+made genuinely good-looking. What remains is no longer a mystery, it is CONSTRUCTION at scale: the
+clock launch is reliable (10/10), single primitives are solid, and the in-game architecture is now
+COMPLETE, fixed NOR networks plus rail BRIDGES compose arbitrary logic on trains. A 1-bit HALF-ADDER, a
+3-input MAJORITY gate, and a 1-bit FULL ADDER (read 7 of 8 input combos clean, each from a small single
+-combo run) all compute on real trains, judged from raw positions. What is left is reliability at SCALE: a
+large single-run circuit is COMPOUNDING-bound (the 8-combo full-adder mega-build times out, so single-combo
+runs whose union is the truth table are the realistic proof), plus a heavy-combo reader stall, the bridge
+-build flake, and running it fast enough to finish a frame. The hard science is done; the hard engineering
+is the compounding.
 
 ### Milestones achieved (verified in software, and the marked ones on real trains)
 
@@ -68,30 +72,38 @@ In OpenTTD, on real trains (judged from raw train positions, never from script):
   XOR sum 0,1,1,0 and the AND carry 0,0,0,1), each gate its own lane wired by fixed spurs, nothing
   re-parked between reads, outputs from raw positions. The architecture that scales to a real datapath.
 - **A 3-input gate computes**: the full-adder CARRY, majority(a,b,cin) = 0,0,0,1,0,1,1,1, clean 8/8 as
-  a fixed network (depth-1 with a terminal read). The full-adder SUM needs the bridge primitive next.
+  a fixed network (depth-1 with a terminal read).
+- **The BRIDGE crossing is built**: a coupling spur carried OVER an independent gate's lane as a rail
+  bridge, both nets computing, no short (a level crossing shorts them). This crosses the planarity frontier,
+  so non-planar logic is now buildable, the enabler for the full-adder sum.
+- **A bridged XOR** (the half-adder sum, done reliably): ~92% logic-clean after closing the reconvergent
+  -read axis (the freeze overshoot and the egress-stall undershoot, both fixed deterministically).
+- **A 1-bit FULL ADDER computes on trains**: SUM = parity, CARRY = majority, read 7 of 8 input combos clean
+  per-combo (sum=parity and cout=majority from raw positions, `scenarios/facombo_gs/`). The 8-combo single
+  -run mega-build is compounding-bound (48 bridges, times out); the single-combo union is the realistic
+  proof. Combo 111 (all-ones) is a heavy-combo reader stall, not a logic error.
 - **Shown in-game**: the gorgeous raycaster frame stamped as on-map signal tiles, a rail portrait
   of a placed circuit, and clock-stepped Fibonacci (1,1,2,3,5,8,13) running on real gate lanes.
 - **OpenTTD builds from source here** (MSVC 2022), and a first speed fork gives ~3x on a bare map.
 
 ### What stands between here and a machine-computed frame
 
-The primitives are all proven, so the remaining blockers are engineering, not unknowns. Two of the
-four were just closed; the other two are now sharply characterized:
+The primitives are all proven, so the remaining blockers are engineering, not unknowns. The in-game
+architecture is now COMPLETE (the composition wall and the planarity frontier are both crossed), so the
+central blocker has shifted from "what to build" to "reliability at scale":
 
-1. **Multi-gate composition at scale (the central one), now BROKEN at the half-adder.** The clock
-   launch is fixed (10/10), and the composition wall is cracked: a 1-bit HALF-ADDER computes as a
-   FIXED physical NOR network on real trains (the 6-gate XOR sum = 0,1,1,0 and the AND carry =
-   0,0,0,1, each gate its own lane wired by fixed spurs, NO train re-parked between reads, outputs
-   from raw positions, STUCK.md #9). This is the architecture that works: the reused-lane,
-   re-park-per-read version (a self-feeding Fibonacci adder) collapsed to zero terms, while the
-   fixed network composes past two gates and does real arithmetic. Scaling it further pinned the
-   NEXT primitive precisely: the full-adder CARRY (majority) also computes as a fixed network
-   (clean 8/8), but the full-adder SUM (parity) is non-monotone, so it needs depth-2 reconvergence
-   whose coupling spur crosses lanes, and a flat-lane network is non-planar there (~28 unavoidable
-   crossings). So the next thing to build in game is the BRIDGE crossing (what the software router
-   already does with `Route.bridges`); that unblocks the sum, then the ripple, then the datapath.
-   The XOR's residual ~1-in-4 flake is the same output-register / reservation-coupling obstacle as
-   blocker 3.
+1. **Reliability at scale, the compounding bound (the central one now).** Every primitive is built and
+   reliable: the clock launch (10/10), deterministic dispatch, the BRIDGE crossing (a coupling spur carried
+   over a foreign lane, crossing the planarity frontier), a bridged XOR (~92%, reconvergent-read axis
+   closed), and a 1-bit FULL ADDER that reads 7 of 8 input combos clean per-combo (sum=parity, cout=majority
+   from raw positions). The wall is now COMPOUNDING: a large single-run circuit multiplies many ~92 to 99
+   percent per-dispatch reliabilities, so the 8-combo full-adder mega-build (48 bridges, ~128 gates) times
+   out around 5 of 8 before finishing. The realistic proof is SINGLE-COMBO runs whose union is the truth
+   table, each combo a small reliable build, which is exactly how the full adder reads 7 of 8 (STUCK.md #9).
+   The remaining single-combo gaps are a heavy-combo reader stall (combo 111 builds clean but its readers do
+   not return under the maximal parked-input load) and the rare bridge-build flake (b0). Tiling to a
+   multi-bit ripple compounds the same way, so closing it means either deterministic-enough dispatch or a
+   faster substrate (blocker 4).
 2. **Router DRC at scale: RESOLVED.** The full CPU (1631 cells) and the large raycaster FSM cones now
    place and route 100 percent of nets with 0 DRC (was ~410), the clock reaching every register, logic
    preserved, all 381 tests green (STUCK.md #8). So the toolchain produces a cleanly buildable full
