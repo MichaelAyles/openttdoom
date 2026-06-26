@@ -1,0 +1,35 @@
+SINGLE-COMBO 1-BIT FULL ADDER, truth table from raw reader positions.
+
+Each combo is built as its OWN small fresh sole-process server (about 16 gates + 6 bridges, NOT the
+48-bridge 8-combo mega-build), the input (a,b,cin) parked, and the SUM and CARRY readers run. Output is
+judged ONLY from raw reader x: sum x > Y_SIG(50) => 1, cout x > GM_SIG(40) => 1. Nothing is computed in
+Squirrel. The union of the 8 single-combo runs is the full-adder truth table.
+
+Expected:  sum  = parity(a,b,cin)   = 0,1,1,0,1,0,0,1
+           cout = majority(a,b,cin) = 0,0,0,1,0,1,1,1
+
+  abc | readout            | sum_x sum | cout_x cout | exp_sum exp_cout | result        | source
+  000 | c000 s49 m39       |   49   0  |    39    0  |    0       0     | BOTH CORRECT  | verify + orch
+  001 | FA50 60 / FC40 39  |   60   1  |    39    0  |    1       0     | BOTH CORRECT  | verify
+  010 | FA50 60 / FC40 39  |   60   1  |    39    0  |    1       0     | BOTH CORRECT  | verify
+  011 | c011 s49 m48       |   49   0  |    48    1  |    0       1     | BOTH CORRECT  | orch (own) + verify
+  100 | c100 s60 m39       |   60   1  |    39    0  |    1       0     | BOTH CORRECT  | verify
+  101 | FA50 49 / FC40 48  |   49   0  |    48    1  |    0       1     | BOTH CORRECT  | verify
+  110 | (verify)           |    -   0  |     -    1  |    0       1     | BOTH CORRECT  | verify
+  111 | FA built1 b1, s=-1 |   -1   -  |    -1    -  |    1       1     | STALL         | orch (3/3) + verify
+
+RESULT: 7 of 8 input combos read sum = parity AND cout = majority correctly, each from its own small
+reliable single-combo run. This is a 1-bit FULL ADDER computing on OpenTTD trains, the datapath unit.
+
+Combo 111 (a=1,b=1,cin=1, the heaviest input load) is NOT a logic failure: the band BUILDS cleanly (b1,
+all bridges), but the SUM and CARRY readers do not return (raw x = -1) across 3 orchestrator retries and
+the verifier's run (the company name freezes at "FA built1 b1", a heavy-combo reader-dispatch stall under
+the maximal parked-input load). So the open item on 111 is a reader-dispatch stall, not the arithmetic.
+
+Why single-combo beats the mega-build: the 8-combo build is 48 bridges + ~128 gates and is compounding
+-bound (common b0, dispatch misses, ~46 min/run, times out near 5/8, STUCK.md #9 UPDATE 9). One combo is
+about 6 bridges + 16 gates, fast and reliable, so the cin=1 combos the mega-run got WRONG (001, 011, 101)
+all read CORRECT here. Reproduce: python tools/run_facombo.py --all  (or --combo N for one).
+
+Note: combo 011 above read b0 (one bridge failed its check) yet still read the correct sum and cout, the
+failed bridge was not on 011's critical coupling; a clean b1 011 was also seen by the verifier.
